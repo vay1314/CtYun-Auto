@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.vscode
+__pycache__
+*.pyc
+*.pyo
+tests
+data
+ctyun_*.json
+.devicecode_*

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}账号 · ctyun-auto{% endblock %}
+{% block content %}
+<header class="page-head"><div><p class="eyebrow">配置</p><h1>账号</h1></div><a class="primary button" href="/accounts/new">添加账号</a></header>
+<article class="panel table-panel">
+  {% if accounts %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>账号</th><th>保活</th><th>AI 对话</th><th>挂机</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for account in accounts %}
+      <tr>
+        <td data-label="账号"><strong>{{ account.name }}</strong><small>{{ masked_username(account.username) }}</small></td>
+        <td data-label="保活"><span class="pill {{ 'success' if account.enabled else 'neutral' }}">{{ '启用' if account.enabled else '停用' }}</span></td>
+        <td data-label="AI 对话"><span class="schedule-state">{{ account.chat_cron if account.chat_enabled else '已关闭' }}</span></td>
+        <td data-label="挂机"><span class="schedule-state">{{ account.pc_cron if account.pc_enabled else '已关闭' }}</span></td>
+        <td data-label="操作" class="actions"><a href="/accounts/{{ account.id }}/edit">编辑</a><form method="post" action="/accounts/{{ account.id }}/delete" data-confirm="确定删除这个账号吗？历史任务记录会保留。"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger-link" type="submit">删除</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<div class="empty"><strong>没有已配置的账号</strong><p>添加账号后，CtYun 会自动重新加载保活配置。</p><a class="primary button" href="/accounts/new">添加第一个账号</a></div>{% endif %}
+</article>
+{% endblock %}

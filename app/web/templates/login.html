@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}登录 · ctyun-auto{% endblock %}
+{% block content %}
+<section class="auth-card compact">
+  <div class="brand-mark large material-symbols-rounded">cloud_sync</div>
+  <p class="eyebrow">管理面板</p>
+  <h1>欢迎回来</h1>
+  {% if error %}<div class="form-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>管理密码<input name="password" type="password" required autofocus autocomplete="current-password"></label>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</section>
+{% endblock %}

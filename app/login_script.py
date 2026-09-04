@@ -4,6 +4,7 @@
 
 import atexit
 import datetime
+import hashlib
 import json
 import os
 import random
@@ -25,6 +26,16 @@ PRESET_MESSAGES = [
     "空腹可以吃饭吗？（简短回答）",
     "推荐一部人生必看电影。（简短回答）",
 ]
+
+
+def get_account_data_dir(username: str, running_in_docker: bool) -> str:
+    """返回不暴露账号明文的账号专属持久化目录。"""
+    if not running_in_docker:
+        return "."
+    account_key = hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+    path = f"/app/data/accounts/{account_key}"
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
 
 
 # ==========================================
@@ -125,16 +136,18 @@ def handle_captcha(page: ChromiumPage) -> None:
 def analyze_login_response(response_body: Union[dict, str, None]) -> int:
     """分析登录接口的返回体，提取并映射为内部状态码。"""
     if not response_body or not isinstance(response_body, dict):
-        return 0
+        return -1
 
     code = response_body.get("code")
     msg = response_body.get("msg", "")
 
+    if code in (0, "0"):
+        return 0
     if code == 51040 and "用户名或密码错误" in msg:
         return 1
-    elif code == 51030:
+    if code == 51030:
         return 2
-    elif code == 51040 and "图形验证码" in msg:
+    if code == 51040 and "图形验证码" in msg:
         return 3
     return -1
 
@@ -297,8 +310,14 @@ def main() -> None:
 
     # 动态构造 Cookie 文件路径，包含手机号
     # 格式：/app/data/ctyun_cookies_xxx_.json
-    if os.getenv("RUNNING_IN_DOCKER") == "true":
-        cookie_file = f"/app/data/ctyun_cookies_{my_username}_.json"
+    running_in_docker = os.getenv("RUNNING_IN_DOCKER") == "true"
+    if running_in_docker:
+        cookie_file = os.path.join(
+            get_account_data_dir(my_username, True), "cookies.json"
+        )
+        legacy_cookie_file = f"/app/data/ctyun_cookies_{my_username}_.json"
+        if not os.path.exists(cookie_file) and os.path.exists(legacy_cookie_file):
+            os.replace(legacy_cookie_file, cookie_file)
     else:
         cookie_file = f"./ctyun_cookies_{my_username}_.json"
 
@@ -353,6 +372,10 @@ def main() -> None:
             attempt += 1
             print(f"[!] 执行过程中发生异常: {e}")
             time.sleep(5)
+
+    if attempt >= max_retries:
+        print(f"[!] 连续 {max_retries} 次尝试均失败。")
+        sys.exit(1)
 
 
 # ==========================================

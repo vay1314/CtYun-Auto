@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}总览 · ctyun-auto{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div><p class="eyebrow">运行状态</p><h1>仪表盘</h1><p class="page-subtitle">查看保活服务、账号与自动任务的实时状态</p></div>
+  <form method="post" action="/ctyun/restart">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="secondary" type="submit"><span class="material-symbols-rounded">refresh</span>重启 CtYun</button>
+  </form>
+</header>
+
+<div class="page-tabs" aria-label="仪表盘视图"><span class="active">运行概览</span><a href="/tasks">任务记录</a></div>
+
+<section class="metric-grid" hx-get="/partials/status" hx-trigger="every 10s" hx-swap="innerHTML">
+  {% include "partials/status_cards.html" %}
+</section>
+
+<section class="split-grid">
+  <article class="panel">
+    <div class="panel-head"><div class="panel-title"><span class="panel-icon material-symbols-rounded">manage_accounts</span><div><p class="eyebrow">账号</p><h2>保活队列</h2></div></div><a href="/accounts">管理账号</a></div>
+    {% if accounts %}
+    <div class="account-list">
+      {% for account in accounts %}
+      <div class="account-row">
+        <span class="account-avatar">{{ account.name[:1] }}</span>
+        <div><strong>{{ account.name }}</strong><small>{{ account.username[:3] }}****{{ account.username[-3:] }}</small></div>
+        <span class="pill {{ 'success' if account.enabled else 'neutral' }}">{{ '启用' if account.enabled else '停用' }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+      <div class="empty"><strong>还没有账号</strong><p>添加天翼云账号后开始保活和积分任务。</p><a class="primary button" href="/accounts/new">添加账号</a></div>
+    {% endif %}
+  </article>
+
+  <article class="panel">
+    <div class="panel-head"><div class="panel-title"><span class="panel-icon material-symbols-rounded">history</span><div><p class="eyebrow">最近活动</p><h2>任务记录</h2></div></div><a href="/tasks">查看全部</a></div>
+    {% if runs %}
+    <div class="timeline">
+      {% for run in runs %}
+      <a href="/logs?run_id={{ run.id }}" class="timeline-row">
+        <span class="status-dot {{ run.status }}"></span>
+        <div><strong>{{ task_labels.get(run.task_type, run.task_type) }}</strong><small>{{ run.account_name or '已删除账号' }} · {{ run.started_at }}</small></div>
+        <span class="pill {{ run.status }}">{{ status_labels.get(run.status, run.status) }}</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}<div class="empty"><p>暂无任务记录。</p></div>{% endif %}
+  </article>
+</section>
+
+<article class="panel build-strip">
+  <div><span class="muted">ctyun-auto</span><strong>v{{ version }}</strong></div>
+  <div><span class="muted">CtYun 源码</span><code>{{ upstream_revision[:12] }}</code></div>
+  <div><span class="muted">面板运行</span><strong>{{ uptime|string|truncate(18, True, '') }}</strong></div>
+</article>
+{% endblock %}

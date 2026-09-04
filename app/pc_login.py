@@ -6,6 +6,7 @@ import argparse
 import atexit  # 新增导入 atexit 模块
 import calendar
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -36,6 +37,16 @@ POINTS_TASK_LIST_URL = (
 RESTART_AT_FILE = "/tmp/ctyun_restart_at"
 
 
+def get_account_data_dir(username: str, running_in_docker: bool) -> str:
+    """返回不暴露账号明文的账号专属持久化目录。"""
+    if not running_in_docker:
+        return "."
+    account_key = hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+    path = f"/app/data/accounts/{account_key}"
+    Path(path).mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
 def init_browser_options(running_in_docker: bool) -> ChromiumOptions:
     """初始化 Chromium 启动参数。"""
     options = ChromiumOptions()
@@ -51,7 +62,11 @@ def init_browser_options(running_in_docker: bool) -> ChromiumOptions:
 def get_auth_data_file(username: str, running_in_docker: bool) -> str:
     """构造账号专属 authData 文件路径。"""
     if running_in_docker:
-        return f"/app/data/ctyun_authData_{username}_.json"
+        path = os.path.join(get_account_data_dir(username, True), "auth_data.json")
+        legacy_path = f"/app/data/ctyun_authData_{username}_.json"
+        if not os.path.exists(path) and os.path.exists(legacy_path):
+            os.replace(legacy_path, path)
+        return path
     return f"./ctyun_authData_{username}_.json"
 
 
@@ -91,8 +106,11 @@ def get_device_code(username: str, running_in_docker: bool) -> str:
     if env_device:
         return env_device.strip()
 
-    if os.getenv("RUNNING_IN_DOCKER") == "true":
-        file_path = f"/app/data/.devicecode_{username}"
+    if running_in_docker:
+        file_path = os.path.join(get_account_data_dir(username, True), "device_code")
+        legacy_path = f"/app/data/.devicecode_{username}"
+        if not os.path.exists(file_path) and os.path.exists(legacy_path):
+            os.replace(legacy_path, file_path)
     else:
         file_path = f"./.devicecode_{username}"
     if os.path.exists(file_path):
@@ -391,6 +409,7 @@ def open_points_center_and_print(page: ChromiumPage, timeout: int = 60) -> int:
 
         time.sleep(5)
         general_points = ""
+        root_element = None
         try:
             root_element = frame.ele("tag:div@class:points-list", timeout=60)
         except Exception:
@@ -511,6 +530,9 @@ def wait_for_points_with_points(
             # 3600 代表任务完成
             if current_progress >= 3600:
                 print(f"\r[-] {current_time_str} 挂机任务完成。")
+                refreshed_points = open_points_center_and_print(page)
+                if refreshed_points > 0:
+                    current_points = refreshed_points
                 auto_redeem_reward_after_hang(
                     page, headers, running_in_docker, current_points
                 )
@@ -558,6 +580,8 @@ def fetch_current_progress(url: str, headers: Dict[str, str]) -> int:
 
         data = response.json()
         task_list = data.get("data")
+        if not isinstance(task_list, list):
+            return 0
 
         for task in task_list:
             if task.get("taskDefName") == "使用1小时":
@@ -571,9 +595,12 @@ def fetch_current_progress(url: str, headers: Dict[str, str]) -> int:
 
 
 def get_redeem_config_path(running_in_docker: bool) -> str:
-    """兑换配置路径，仅保存容器内。"""
+    """兑换配置路径，按账号保存到持久化目录。"""
     if running_in_docker:
-        return "/app/redeem_config.json"
+        username = os.getenv("APP_USER", "")
+        return os.path.join(
+            get_account_data_dir(username, True), "redeem_config.json"
+        )
     return "./redeem_config.json"
 
 

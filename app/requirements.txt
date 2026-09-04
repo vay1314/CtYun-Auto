@@ -1,0 +1,12 @@
+DrissionPage==4.0.4.19
+argon2-cffi>=23.1,<26
+croniter>=2.0,<7
+cryptography>=42,<47
+ddddocr>=1.5,<2
+fastapi>=0.115,<1
+jinja2>=3.1,<4
+itsdangerous>=2.2,<3
+python-multipart>=0.0.9,<1
+requests>=2.31,<3
+supervisor>=4.2,<5
+uvicorn[standard]>=0.30,<1

@@ -1,49 +1,91 @@
-# 1. 使用你指定的 Ctyun 镜像作为基础镜像
-FROM su3817807/ctyun:latest
+# syntax=docker/dockerfile:1.7
 
-# 2. 切换到 root 用户以安装系统级依赖
-USER root
+ARG CTYUN_REPO=https://github.com/leleji/CtYun.git
+ARG CTYUN_REF=master
+ARG APP_VERSION=dev
 
-# 3. 设置时区为亚洲/上海，确保 Cron 定时任务按北京时间执行
-ENV TZ=Asia/Shanghai
-ENV RUNNING_IN_DOCKER=true
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS ctyun-builder
 
-# 替换为阿里云镜像源
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true && \
-    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+ARG CTYUN_REPO
+ARG CTYUN_REF
 
-# 4. 安装 Python3、包管理器、Chromium、中文字体、Cron 以及图像处理底层库
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    chromium \
-    chromium-driver \
-    fonts-wqy-zenhei \
-    cron \
-    libgl1 \
-    libglib2.0-0 \
-    dos2unix \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-# 5. 安装 Python 依赖（Debian 12 默认开启 PEP 668，需要 break-system-packages）
-RUN pip3 install --no-cache-dir DrissionPage==4.0.4.19 ddddocr --break-system-packages
+WORKDIR /src
+RUN git clone "$CTYUN_REPO" CtYun \
+    && cd CtYun \
+    && git checkout --detach "$CTYUN_REF"
 
-# 6. 将 Python 脚本和启动脚本复制到工作目录
-COPY login_script.py /app/login_script.py
-COPY pc_login.py /app/pc_login.py
-COPY entrypoint.sh /app/entrypoint.sh
+RUN dotnet restore /src/CtYun/CtYun/CtYun.csproj \
+    && dotnet publish /src/CtYun/CtYun/CtYun.csproj \
+        --configuration Release \
+        --no-restore \
+        -p:PublishAot=false \
+        --output /out
 
-# 7. 修复 Windows 环境下可能产生的 CRLF 换行符问题，并赋予执行权限
-RUN dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 
-# 8. 配置 Cron 定时任务
-RUN { \
-    echo "0 3,20 * * * root /usr/bin/python3 /app/login_script.py > /proc/1/fd/1 2>&1"; \
-    echo "0 4,6 * * * root /usr/bin/python3 /app/pc_login.py > /proc/1/fd/1 2>&1"; \
-    } > /etc/cron.d/ctyun-cron \
-    && chmod 0644 /etc/cron.d/ctyun-cron \
-    && crontab /etc/cron.d/ctyun-cron
+ARG CTYUN_REPO
+ARG CTYUN_REF
+ARG APP_VERSION
 
-# 9. 覆盖原镜像的 ENTRYPOINT，使用我们的双进程启动脚本
+LABEL org.opencontainers.image.title="ctyun-auto" \
+      org.opencontainers.image.description="CtYun keep-alive with points automation" \
+      org.opencontainers.image.source="${CTYUN_REPO}" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      io.ctyun.upstream.revision="${CTYUN_REF}"
+
+USER root
+WORKDIR /app
+
+ENV TZ=Asia/Shanghai \
+    RUNNING_IN_DOCKER=true \
+    CTYUN_DATA_DIR=/app/data \
+    PYTHONUNBUFFERED=1 \
+    APP_PORT=9845 \
+    APP_VERSION=${APP_VERSION} \
+    CTYUN_REVISION=${CTYUN_REF}
+
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo "$TZ" > /etc/timezone \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        chromium \
+        chromium-driver \
+        dos2unix \
+        fonts-wqy-zenhei \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        procps \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY app/requirements.txt /app/requirements.txt
+RUN pip3 install \
+        --break-system-packages \
+        --no-cache-dir \
+        --requirement /app/requirements.txt
+
+COPY --from=ctyun-builder /out/ /app/
+COPY app/login_script.py /app/login_script.py
+COPY app/pc_login.py /app/pc_login.py
+COPY app/entrypoint.sh /app/entrypoint.sh
+COPY app/ctyun_runner.sh /app/ctyun_runner.sh
+COPY app/supervisord.conf /app/supervisord.conf
+COPY app/web /app/web
+COPY VERSION /app/VERSION
+
+RUN dos2unix /app/entrypoint.sh /app/ctyun_runner.sh \
+    && chmod +x /app/entrypoint.sh /app/ctyun_runner.sh
+
+VOLUME ["/app/data"]
+EXPOSE 9845
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9845/health', timeout=3)" || exit 1
+
 ENTRYPOINT ["/app/entrypoint.sh"]

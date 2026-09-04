@@ -1,0 +1,20 @@
+<article class="metric-card accent">
+  <div class="metric-top"><span class="metric-icon material-symbols-rounded">cloud_done</span><span class="metric-label">CtYun 保活</span></div>
+  <strong class="metric-value status-text {{ ctyun.state }}">{{ '运行中' if ctyun.state == 'running' else ('已停止' if ctyun.state == 'stopped' else '未知') }}</strong>
+  <small>{{ ctyun.detail or '等待状态信息' }}</small>
+</article>
+<article class="metric-card">
+  <div class="metric-top"><span class="metric-icon material-symbols-rounded">account_circle</span><span class="metric-label">账号</span></div>
+  <strong class="metric-value">{{ accounts|selectattr('enabled')|list|length }}<em>/ {{ accounts|length }}</em></strong>
+  <small>启用 / 全部</small>
+</article>
+<article class="metric-card">
+  <div class="metric-top"><span class="metric-icon material-symbols-rounded">bolt</span><span class="metric-label">执行中的任务</span></div>
+  <strong class="metric-value">{{ running_count }}</strong>
+  <small>浏览器自动化进程</small>
+</article>
+<article class="metric-card">
+  <div class="metric-top"><span class="metric-icon material-symbols-rounded">event_note</span><span class="metric-label">最近任务</span></div>
+  <strong class="metric-value small">{% if runs %}{{ task_labels.get(runs[0].task_type, runs[0].task_type) }}{% else %}暂无{% endif %}</strong>
+  <small>{% if runs %}{{ status_labels.get(runs[0].status, runs[0].status) }} · {{ runs[0].started_at }}{% else %}等待首次执行{% endif %}</small>
+</article>

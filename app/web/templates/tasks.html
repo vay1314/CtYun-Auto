@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}任务 · ctyun-auto{% endblock %}
+{% block content %}
+<header class="page-head"><div><p class="eyebrow">自动化</p><h1>任务</h1></div></header>
+<section class="task-launch-grid">
+{% for account in accounts %}
+  <article class="panel launch-card">
+    <div><span class="account-avatar">{{ account.name[:1] }}</span><strong>{{ account.name }}</strong><small>{{ '账号启用' if account.enabled else '账号停用' }}</small></div>
+    <div class="launch-actions">
+      <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行 AI 对话</button></form>
+      <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行挂机</button></form>
+    </div>
+  </article>
+{% endfor %}
+</section>
+<article class="panel table-panel">
+  <div class="panel-head"><div><p class="eyebrow">历史</p><h2>运行记录</h2></div><form method="get" class="inline-filter"><select name="account_id" onchange="this.form.submit()"><option value="">全部账号</option>{% for account in accounts %}<option value="{{ account.id }}" {% if selected_account == account.id %}selected{% endif %}>{{ account.name }}</option>{% endfor %}</select></form></div>
+  {% if runs %}<div class="table-wrap"><table><thead><tr><th>编号</th><th>任务</th><th>账号</th><th>触发</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead><tbody>
+  {% for run in runs %}<tr><td data-label="编号">#{{ run.id }}</td><td data-label="任务">{{ task_labels.get(run.task_type, run.task_type) }}</td><td data-label="账号">{{ run.account_name or '已删除账号' }}</td><td data-label="触发">{{ '定时' if run.trigger_source == 'schedule' else '手动' }}</td><td data-label="状态"><span class="pill {{ run.status }}">{{ status_labels.get(run.status, run.status) }}</span></td><td data-label="开始时间">{{ run.started_at }}</td><td data-label="操作" class="actions"><a href="/logs?run_id={{ run.id }}">日志</a>{% if run.status in ['queued','running'] %}<form method="post" action="/tasks/{{ run.id }}/stop"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger-link" type="submit">停止</button></form>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<div class="empty"><p>暂无任务记录。</p></div>{% endif %}
+</article>
+{% endblock %}
