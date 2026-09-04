@@ -26,6 +26,29 @@ document.addEventListener("DOMContentLoaded", () => {
     if (event.key === "Escape") closeSidebar();
   });
 
+  const uptime = document.querySelector("#program-uptime[data-uptime-seconds]");
+  if (uptime) {
+    const initialSeconds = Math.max(0, Number(uptime.dataset.uptimeSeconds) || 0);
+    const startedCountingAt = performance.now();
+    const formatUptime = (value) => {
+      const totalSeconds = Math.max(0, Math.floor(value));
+      const days = Math.floor(totalSeconds / 86400);
+      const hours = Math.floor((totalSeconds % 86400) / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      const clock = [hours, minutes, seconds]
+        .map((part) => String(part).padStart(2, "0"))
+        .join(":");
+      return days ? `${days}天 ${clock}` : clock;
+    };
+    const updateUptime = () => {
+      const elapsed = (performance.now() - startedCountingAt) / 1000;
+      uptime.textContent = formatUptime(initialSeconds + elapsed);
+    };
+    updateUptime();
+    window.setInterval(updateUptime, 1000);
+  }
+
   const output = document.querySelector("#log-output[data-stream]");
   if (!output) return;
   const stream = new EventSource(output.dataset.stream);

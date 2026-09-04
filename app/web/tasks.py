@@ -20,10 +20,57 @@ TASK_LABELS = {"chat": "AI 对话积分", "pc": "云电脑挂机"}
 SECRET_PATTERN = re.compile(
     r"(?i)(authorization|cookie|token|password|passwd)(\s*[:=]\s*)([^\s,;]+)"
 )
+SUPERVISOR_RUNNING_PATTERN = re.compile(
+    r"^\S+\s+RUNNING\s+pid\s+(?P<pid>\d+),\s+uptime\s+(?P<uptime>.+)$"
+)
+SUPERVISOR_STATE_PATTERN = re.compile(r"^\S+\s+(?P<status>[A-Z]+)")
 
 
 def redact(text: str) -> str:
     return SECRET_PATTERN.sub(r"\1\2***", text)
+
+
+def format_supervisor_uptime(value: str) -> str:
+    match = re.fullmatch(
+        r"(?:(?P<days>\d+)\s+days?,\s*)?"
+        r"(?P<hours>\d+):(?P<minutes>\d{2}):(?P<seconds>\d{2})",
+        value.strip(),
+    )
+    if not match:
+        return value.strip()
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours"))
+    minutes = int(match.group("minutes"))
+    seconds = int(match.group("seconds"))
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes:
+        parts.append(f"{minutes}分")
+    parts.append(f"{seconds}秒")
+    return "".join(parts)
+
+
+def describe_supervisor_status(text: str) -> tuple[str, str]:
+    running = SUPERVISOR_RUNNING_PATTERN.match(text)
+    if running:
+        uptime = format_supervisor_uptime(running.group("uptime"))
+        return "running", f"进程号 {running.group('pid')} · 已运行 {uptime}"
+
+    state_match = SUPERVISOR_STATE_PATTERN.match(text)
+    status = state_match.group("status") if state_match else "UNKNOWN"
+    descriptions = {
+        "STARTING": ("unknown", "保活进程正在启动"),
+        "STOPPING": ("unknown", "保活进程正在停止"),
+        "STOPPED": ("stopped", "保活进程已停止"),
+        "EXITED": ("stopped", "保活进程已退出"),
+        "BACKOFF": ("stopped", "启动失败，正在重试"),
+        "FATAL": ("stopped", "保活进程启动失败"),
+        "UNKNOWN": ("unknown", "暂时无法读取保活进程状态"),
+    }
+    return descriptions.get(status, descriptions["UNKNOWN"])
 
 
 def list_runs(limit: int = 100, account_id: int | None = None):
@@ -315,7 +362,7 @@ async def ctyun_status() -> dict:
         )
         output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
         text = output.decode("utf-8", errors="replace").strip()
-        state = "running" if " RUNNING " in f" {text} " else "stopped"
-        return {"state": state, "detail": text}
+        state, detail = describe_supervisor_status(text)
+        return {"state": state, "detail": detail}
     except Exception as error:
         return {"state": "unknown", "detail": str(error)}

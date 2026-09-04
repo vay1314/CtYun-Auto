@@ -247,7 +247,10 @@ async def dashboard(request: Request):
         runs=runs,
         ctyun=ctyun,
         running_count=len(task_manager.active),
-        uptime=datetime.now().astimezone() - task_manager.started_at,
+        uptime_seconds=max(
+            0,
+            int((datetime.now().astimezone() - task_manager.started_at).total_seconds()),
+        ),
         upstream_revision=os.getenv("CTYUN_REVISION", "master"),
     )
 

@@ -52,6 +52,6 @@
 <article class="panel build-strip">
   <div><span class="muted">ctyun-auto</span><strong>v{{ version }}</strong></div>
   <div><span class="muted">CtYun 源码</span><code>{{ upstream_revision[:12] }}</code></div>
-  <div><span class="muted">面板运行</span><strong>{{ uptime|string|truncate(18, True, '') }}</strong></div>
+  <div><span class="muted">程序运行时长</span><strong id="program-uptime" data-uptime-seconds="{{ uptime_seconds }}">{{ uptime_seconds }} 秒</strong></div>
 </article>
 {% endblock %}
