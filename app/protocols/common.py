@@ -54,8 +54,8 @@ class RemoteOcrSolver:
                     response.raise_for_status()
                     payload = require_json_object(response, "验证码识别")
                 result = str(payload.get("data") or "").strip()
-                if not result or not result.isdigit():
-                    raise ProtocolError("验证码识别结果不是有效数字")
+                if not result:
+                    raise ProtocolError("验证码识别结果为空")
                 return result
             except (requests.RequestException, ProtocolError) as error:
                 last_error = error
