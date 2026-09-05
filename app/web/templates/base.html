@@ -6,9 +6,9 @@
   <meta name="color-scheme" content="light">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{% block title %}ctyun-auto{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v={{ version }}-ui2">
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v={{ version }}-ui3">
   <script src="{{ url_for('static', path='htmx.min.js') }}?v=2.0.4" defer></script>
-  <script src="{{ url_for('static', path='app.js') }}?v={{ version }}-ui2" defer></script>
+  <script src="{{ url_for('static', path='app.js') }}?v={{ version }}-ui3" defer></script>
 </head>
 <body data-authenticated="{{ 'true' if request.session.get('authenticated') else 'false' }}">
   {% if request.session.get('authenticated') %}

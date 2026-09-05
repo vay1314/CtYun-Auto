@@ -2,16 +2,8 @@
 {% block title %}任务 · ctyun-auto{% endblock %}
 {% block content %}
 <header class="page-head"><div><p class="eyebrow">自动化</p><h1>任务</h1></div></header>
-<section class="task-launch-grid">
-{% for account in accounts %}
-  <article class="panel launch-card">
-    <div><span class="account-avatar">{{ account.name[:1] }}</span><strong>{{ account.name }}</strong><small>{{ '账号启用' if account.enabled else '账号停用' }}</small></div>
-    <div class="launch-actions">
-      <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行 AI 对话</button></form>
-      <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行挂机</button></form>
-    </div>
-  </article>
-{% endfor %}
+<section class="task-launch-grid" id="task-account-status" hx-get="/partials/task-accounts" hx-trigger="every 10s" hx-swap="innerHTML">
+{% include "partials/task_accounts.html" %}
 </section>
 <article class="panel table-panel">
   <div class="panel-head"><div><p class="eyebrow">历史</p><h2>运行记录</h2></div><form method="get" class="inline-filter"><select name="account_id" onchange="this.form.submit()"><option value="">全部账号</option>{% for account in accounts %}<option value="{{ account.id }}" {% if selected_account == account.id %}selected{% endif %}>{{ account.name }}</option>{% endfor %}</select></form></div>

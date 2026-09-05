@@ -10,6 +10,10 @@ from croniter import croniter
 from .accounts import get_account_secret
 from .config import APP_ROOT, LOG_DIR, SUPERVISOR_CONFIG
 from .db import database, now_text
+from .platform_status import (
+    refresh_platform_status,
+    save_platform_status_error,
+)
 
 
 TASK_COMMANDS = {
@@ -118,6 +122,7 @@ class TaskManager:
         self.active: dict[tuple[int, str], asyncio.subprocess.Process | None] = {}
         self.run_tasks: dict[int, asyncio.Task] = {}
         self.stopping: set[int] = set()
+        self.status_locks: dict[int, asyncio.Lock] = {}
         self.scheduler_task: asyncio.Task | None = None
         self.started_at = datetime.now().astimezone()
 
@@ -180,6 +185,20 @@ class TaskManager:
         self.run_tasks[run_id] = task
         return True, run_id
 
+    async def refresh_account_status(self, account_id: int) -> dict:
+        lock = self.status_locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            try:
+                return await asyncio.to_thread(refresh_platform_status, account_id)
+            except Exception as error:
+                try:
+                    await asyncio.to_thread(
+                        save_platform_status_error, account_id, redact(str(error))
+                    )
+                except Exception:
+                    pass
+                raise
+
     async def _execute(
         self, run_id: int, account: dict, task_type: str, log_path: Path
     ) -> None:
@@ -238,6 +257,20 @@ class TaskManager:
                     "message = ? WHERE id = ?",
                     (status, now_text(), exit_code, message, run_id),
                 )
+            if status != "stopped":
+                try:
+                    snapshot = await self.refresh_account_status(int(account["id"]))
+                    with log_path.open("a", encoding="utf-8") as log:
+                        log.write(
+                            f"[{now_text()}] 平台任务状态已更新，"
+                            f"总积分：{snapshot['total_points']}\n"
+                        )
+                except Exception as status_error:
+                    with log_path.open("a", encoding="utf-8") as log:
+                        log.write(
+                            f"[{now_text()}] 平台任务状态查询失败："
+                            f"{redact(str(status_error))}\n"
+                        )
         except Exception as error:
             message = redact(str(error))
             with database() as connection:

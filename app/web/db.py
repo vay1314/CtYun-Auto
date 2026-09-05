@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS scheduler_claims (
     PRIMARY KEY (account_id, task_type, minute_key)
 );
 
+CREATE TABLE IF NOT EXISTS account_platform_status (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    total_points INTEGER,
+    tasks_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    error TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_task_runs_started_at
 ON task_runs(started_at DESC);
 

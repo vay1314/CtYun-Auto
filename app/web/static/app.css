@@ -177,6 +177,22 @@ input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .launch-card .account-avatar { grid-row: span 2; }
 .launch-card small { color: var(--muted); }
 .launch-actions { display: flex; gap: 8px; }
+.platform-card { display: block; }
+.platform-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.platform-account { display: flex; align-items: center; gap: 12px; }
+.platform-account strong, .platform-account small, .points-summary strong, .points-summary small { display: block; }
+.points-summary { min-width: 88px; text-align: right; }
+.points-summary strong { margin-top: 2px; color: var(--blue-strong); font-size: 1.55rem; }
+.platform-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 19px 0 14px; }
+.platform-task { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(247, 250, 253, .72); }
+.platform-task-name { display: block; min-height: 38px; font-size: .82rem; font-weight: 700; }
+.platform-task .pill { margin-bottom: 7px; }
+.platform-task small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.platform-updated { margin-bottom: 14px; color: var(--muted); font-size: .76rem; }
+.platform-error { margin: 0 0 8px; color: var(--red); font-size: .8rem; }
+.platform-card .launch-actions { flex-wrap: wrap; }
+.platform-card .launch-actions form { margin: 0; }
+.platform-card .material-symbols-rounded { font-size: 18px; }
 .inline-filter select { min-width: 160px; }
 .log-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; }
 .log-sources { padding: 12px; max-height: 72vh; overflow-y: auto; }
@@ -225,6 +241,9 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .log-sources a { min-width: 150px; }
   .launch-card { align-items: stretch; flex-direction: column; }
   .launch-actions button { flex: 1; }
+  .platform-task-grid { grid-template-columns: 1fr; }
+  .platform-task-name { min-height: 0; }
+  .platform-card .launch-actions, .platform-card .launch-actions form, .platform-card .launch-actions button { width: 100%; }
   .page-head { align-items: flex-start; }
   .page-head > form, .page-head > .button { margin-top: 6px; }
 }

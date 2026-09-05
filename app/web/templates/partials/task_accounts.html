@@ -1,0 +1,48 @@
+{% for account in accounts %}
+{% set platform = platform_statuses.get(account.id) %}
+<article class="panel launch-card platform-card">
+  <div class="platform-card-head">
+    <div class="platform-account">
+      <span class="account-avatar">{{ account.name[:1] }}</span>
+      <span><strong>{{ account.name }}</strong><small>{{ '账号启用' if account.enabled else '账号停用' }}</small></span>
+    </div>
+    <div class="points-summary">
+      <small>当前总积分</small>
+      <strong>{{ platform.total_points if platform and platform.total_points is not none else '--' }}</strong>
+    </div>
+  </div>
+
+  <div class="platform-task-grid">
+    {% for key, label in [('login', '登录 AI 云电脑'), ('usage', '使用 1 小时'), ('chat', 'AI 对话')] %}
+    {% set item = platform.tasks.get(key) if platform else none %}
+    <div class="platform-task">
+      <span class="platform-task-name">{{ label }}</span>
+      <span class="pill {{ item.state if item else 'warning' }}">{{ item.state_label if item else '待查询' }}</span>
+      <small>
+        {% if item and item.total %}
+          进度 {{ item.current }}/{{ item.total }}
+        {% elif item %}
+          暂无进度数据
+        {% else %}
+          尚未获取平台状态
+        {% endif %}
+      </small>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if platform and platform.error %}
+  <p class="platform-error">{{ platform.error }}</p>
+  {% endif %}
+  <div class="platform-updated">
+    {{ '更新时间：' ~ platform.updated_at if platform else '尚未查询平台任务状态' }}
+  </div>
+  <div class="launch-actions">
+    <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行 AI 对话</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行挂机</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/platform-status/refresh"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}><span class="material-symbols-rounded">sync</span>查询任务状态</button></form>
+  </div>
+</article>
+{% else %}
+<article class="panel empty"><p>请先添加账号。</p></article>
+{% endfor %}

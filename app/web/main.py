@@ -41,6 +41,7 @@ from .tasks import (
     redact,
     supervisor_action,
 )
+from .platform_status import list_platform_statuses
 
 
 LOGIN_WINDOW_SECONDS = 300
@@ -383,8 +384,41 @@ async def tasks_page(request: Request, account_id: int | None = None):
         "tasks.html",
         runs=list_runs(100, account_id),
         accounts=list_accounts(),
+        platform_statuses=list_platform_statuses(),
         selected_account=account_id,
     )
+
+
+@app.get("/partials/task-accounts", response_class=HTMLResponse)
+async def task_accounts_partial(request: Request):
+    guard = auth_redirect(request)
+    if guard:
+        return HTMLResponse("", status_code=401)
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/task_accounts.html",
+        context={
+            "request": request,
+            "csrf_token": csrf_token(request),
+            "accounts": list_accounts(),
+            "platform_statuses": list_platform_statuses(),
+        },
+    )
+
+
+@app.post("/accounts/{account_id}/platform-status/refresh")
+async def platform_status_refresh(request: Request, account_id: int):
+    guard = auth_redirect(request)
+    if guard:
+        return guard
+    if not await require_csrf(request):
+        return HTMLResponse("CSRF validation failed", status_code=403)
+    try:
+        snapshot = await task_manager.refresh_account_status(account_id)
+        add_flash(request, f"平台状态已更新，总积分 {snapshot['total_points']}")
+    except Exception as error:
+        add_flash(request, f"平台状态查询失败：{redact(str(error))}", "error")
+    return RedirectResponse("/tasks", status_code=303)
 
 
 @app.post("/accounts/{account_id}/tasks/{task_type}/run")
