@@ -46,16 +46,14 @@ ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     APP_PORT=9845 \
     APP_VERSION=${APP_VERSION} \
-    CTYUN_REVISION=${CTYUN_REF}
+    CTYUN_REVISION=${CTYUN_REF} \
+    OCR_ENDPOINT=https://orc.1999111.xyz/ocr
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         dos2unix \
-        libgl1 \
-        libglib2.0-0 \
-        libgomp1 \
         procps \
         python3 \
         python3-pip \

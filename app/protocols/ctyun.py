@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from .common import NumericOcrSolver, ProtocolError, require_json_object
+from .common import ProtocolError, RemoteOcrSolver, require_json_object
 
 
 PC_API_BASE = "https://desk.ctyun.cn:8810"
@@ -124,7 +124,7 @@ class CtYunProtocolClient:
                     timeout=self.timeout,
                 )
                 captcha_response.raise_for_status()
-                captcha = NumericOcrSolver().solve(captcha_response.content)
+                captcha = RemoteOcrSolver().solve(captcha_response.content)
                 if not captcha:
                     raise ProtocolError("登录图形验证码识别失败")
 
@@ -177,7 +177,7 @@ class CtYunProtocolClient:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        captcha = NumericOcrSolver().solve(response.content)
+        captcha = RemoteOcrSolver().solve(response.content)
         if not captcha:
             raise ProtocolError("短信图形验证码识别失败")
         response = self.session.get(

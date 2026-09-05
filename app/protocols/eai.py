@@ -17,8 +17,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 from .common import (
-    NumericOcrSolver,
     ProtocolError,
+    RemoteOcrSolver,
     decode_base64_image,
     require_json_object,
 )
@@ -174,7 +174,7 @@ class EaiProtocolClient:
             image_value = captcha_payload.get("data")
             if not captcha_key or not isinstance(image_value, str):
                 raise ProtocolError("AI 验证码响应缺少图片或 captcha key")
-            captcha_code = NumericOcrSolver().solve(decode_base64_image(image_value))
+            captcha_code = RemoteOcrSolver().solve(decode_base64_image(image_value))
             if not captcha_code:
                 raise ProtocolError("AI 图形验证码识别失败")
         raise ProtocolError(f"AI IAM 登录失败：{last_message}")
