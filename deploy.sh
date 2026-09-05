@@ -10,13 +10,14 @@ run_pc_login_until_hang_then_background() {
     local container_name="$1"
     local log_file="/app/data/pc_login_once.log"
     local pid_file="/app/data/pc_login_once.pid"
+    local exit_file="/app/data/pc_login_once.exit"
     local max_wait_seconds=900
     local waited_seconds=0
     local printed_lines=0
 
     echo -e "${YELLOW}[*] 启动云电脑一小时使用积分任务...${NC}"
 
-    docker exec "$container_name" sh -c "rm -f '$log_file' '$pid_file'; nohup env PYTHONUNBUFFERED=1 python3 -u /app/pc_login.py > '$log_file' 2>&1 & echo \$! > '$pid_file'"
+    docker exec "$container_name" sh -c "rm -f '$log_file' '$pid_file' '$exit_file'; nohup sh -c 'env PYTHONUNBUFFERED=1 python3 -u /app/pc_login.py > \"$log_file\" 2>&1; echo \$? > \"$exit_file\"' >/dev/null 2>&1 & echo \$! > '$pid_file'"
 
     while true; do
         local new_lines
@@ -29,13 +30,19 @@ run_pc_login_until_hang_then_background() {
             done <<< "$new_lines"
         fi
 
-        if docker exec "$container_name" sh -c "grep -aEq '挂机剩余' '$log_file'"; then
-            echo -e "${GREEN}[*] 已检测到挂机阶段，已转后台继续运行。${NC}"
+        if docker exec "$container_name" sh -c "grep -aEq '使用1小时进度' '$log_file'"; then
+            echo -e "${GREEN}[*] 已检测到积分任务轮询，已转后台继续运行。${NC}"
             return 0
         fi
 
         if ! docker exec "$container_name" sh -c "[ -f '$pid_file' ] && kill -0 \$(cat '$pid_file') 2>/dev/null"; then
-            echo -e "${RED}[!] 任务已提前退出${NC}"
+            local exit_code
+            exit_code=$(docker exec "$container_name" sh -c "cat '$exit_file' 2>/dev/null || echo 1")
+            if [ "$exit_code" = "0" ]; then
+                echo -e "${GREEN}[*] 首次积分任务已执行完成。${NC}"
+                return 0
+            fi
+            echo -e "${RED}[!] 任务已提前退出（退出码 $exit_code）${NC}"
             echo -e "${YELLOW}[*] 最近日志如下：${NC}"
             docker exec "$container_name" sh -c "tail -n 30 '$log_file' 2>/dev/null || true"
             return 1
@@ -91,6 +98,9 @@ echo ""
     exit 1
 }
 
+# 与 Web 数据库和 CtYun.dll 共用同一稳定设备码。
+DEVICECODE="web_$(printf '%s' "$APP_USER" | sha256sum | cut -c1-32)"
+
 while true; do
     read -e -p "数据目录 [留空默认 ~/data]: " INPUT_DIR
     if [ -z "$INPUT_DIR" ]; then
@@ -141,10 +151,9 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   -e APP_USER="$APP_USER" \
   -e APP_PASSWORD="$APP_PASSWORD" \
+  -e DEVICECODE="$DEVICECODE" \
   -v "$DATA_DIR":/app/data \
   -p 9845:9845 \
-  --add-host "deskcdn.ctyun.cn:106.120.187.154" \
-  --add-host "deskcdn.ctyun.cn.ctadns.cn:106.120.187.154" \
   --restart unless-stopped \
   ctyun-auto-sign:v1
 

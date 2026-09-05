@@ -1,4 +1,3 @@
-DrissionPage==4.0.4.19
 argon2-cffi>=23.1,<26
 croniter>=2.0,<7
 cryptography>=42,<47

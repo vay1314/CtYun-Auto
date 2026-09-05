@@ -9,3 +9,6 @@ tests
 data
 ctyun_*.json
 .devicecode_*
+*.har
+storage-data.json
+ai-storage-*.json

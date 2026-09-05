@@ -52,10 +52,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        chromium \
-        chromium-driver \
         dos2unix \
-        fonts-wqy-zenhei \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
@@ -73,6 +70,7 @@ RUN pip3 install \
 COPY --from=ctyun-builder /out/ /app/
 COPY app/login_script.py /app/login_script.py
 COPY app/pc_login.py /app/pc_login.py
+COPY app/protocols /app/protocols
 COPY app/entrypoint.sh /app/entrypoint.sh
 COPY app/ctyun_runner.sh /app/ctyun_runner.sh
 COPY app/supervisord.conf /app/supervisord.conf

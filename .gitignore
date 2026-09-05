@@ -11,3 +11,8 @@ __pycache__/
 # 忽略其他
 .devicecode_*
 ctyun_*.json
+
+# 抓包与浏览器存储可能包含账号、Cookie 和 Token
+*.har
+storage-data.json
+ai-storage-*.json
