@@ -47,9 +47,7 @@ ENV TZ=Asia/Shanghai \
     APP_PORT=9845 \
     APP_VERSION=${APP_VERSION} \
     CTYUN_REVISION=${CTYUN_REF} \
-    OCR_ENDPOINT=https://orc.1999111.xyz/ocr \
-    CAPTCHA_DEBUG=true \
-    CAPTCHA_DEBUG_LIMIT=100
+    OCR_ENDPOINT=https://orc.1999111.xyz/ocr
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone \

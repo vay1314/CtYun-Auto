@@ -5,15 +5,12 @@ import binascii
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import requests
 
 
 DEFAULT_OCR_ENDPOINT = "https://orc.1999111.xyz/ocr"
-DEFAULT_CAPTCHA_LOG_LIMIT = 100
 
 
 class ProtocolError(RuntimeError):
@@ -38,27 +35,6 @@ class RemoteOcrSolver:
                     os.getenv("OCR_ENDPOINT", DEFAULT_OCR_ENDPOINT).strip()
                     or DEFAULT_OCR_ENDPOINT
                 )
-                instance.debug_enabled = os.getenv("CAPTCHA_DEBUG", "").lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-                data_dir = Path(os.getenv("CTYUN_DATA_DIR", "/app/data"))
-                instance.debug_dir = Path(
-                    os.getenv("CAPTCHA_DEBUG_DIR", str(data_dir / "logs" / "captcha"))
-                )
-                try:
-                    instance.debug_limit = max(
-                        1,
-                        int(
-                            os.getenv(
-                                "CAPTCHA_DEBUG_LIMIT", str(DEFAULT_CAPTCHA_LOG_LIMIT)
-                            )
-                        ),
-                    )
-                except ValueError:
-                    instance.debug_limit = DEFAULT_CAPTCHA_LOG_LIMIT
                 instance.session = requests.Session()
                 instance.session.headers.update(
                     {"Referer": "https://pc.ctyun.cn/"}
@@ -66,45 +42,9 @@ class RemoteOcrSolver:
                 cls._instance = instance
         return cls._instance
 
-    @staticmethod
-    def _image_extension(image: bytes) -> str:
-        if image.startswith(b"\x89PNG\r\n\x1a\n"):
-            return ".png"
-        if image.startswith(b"\xff\xd8\xff"):
-            return ".jpg"
-        if image.startswith((b"GIF87a", b"GIF89a")):
-            return ".gif"
-        return ".bin"
-
-    def _save_debug_image(self, image: bytes) -> Path | None:
-        if not self.debug_enabled:
-            return None
-        try:
-            self.debug_dir.mkdir(parents=True, exist_ok=True)
-            filename = (
-                f"captcha-{time.strftime('%Y%m%d-%H%M%S')}-"
-                f"{time.time_ns() % 1_000_000_000:09d}-{uuid4().hex[:8]}"
-                f"{self._image_extension(image)}"
-            )
-            path = self.debug_dir / filename
-            path.write_bytes(image)
-            images = sorted(
-                (item for item in self.debug_dir.glob("captcha-*") if item.is_file()),
-                key=lambda item: item.stat().st_mtime_ns,
-                reverse=True,
-            )
-            for expired in images[self.debug_limit :]:
-                expired.unlink(missing_ok=True)
-            print(f"[*] 验证码图片已保存：{path}", flush=True)
-            return path
-        except OSError as error:
-            print(f"[!] 验证码图片保存失败：{error}", flush=True)
-            return None
-
     def solve(self, image: bytes) -> str:
         if not image:
             raise ProtocolError("验证码图片为空")
-        debug_path = self._save_debug_image(image)
         encoded = base64.b64encode(image).decode("ascii")
         last_error: Exception | None = None
         for attempt in range(1, 4):
@@ -119,9 +59,6 @@ class RemoteOcrSolver:
                 result = "".join(str(payload.get("data") or "").split())
                 if not result:
                     raise ProtocolError("验证码识别结果为空")
-                if self.debug_enabled:
-                    location = f"，图片：{debug_path}" if debug_path else ""
-                    print(f"[*] 验证码识别结果：{result}{location}", flush=True)
                 return result
             except (requests.RequestException, ProtocolError) as error:
                 last_error = error
