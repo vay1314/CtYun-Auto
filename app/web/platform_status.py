@@ -16,6 +16,7 @@ PLATFORM_TASKS = {
     "chat": {"id": 1004, "label": "AI 对话", "names": {"与AI对话1次", "AI对话"}},
 }
 AUTH_ERROR_CODES = {"40010", "401", "403", "-401", "-403"}
+STATUS_LOGIN_ATTEMPTS = 8
 
 
 def _normalize_task(task: dict | None, definition: dict) -> dict:
@@ -138,7 +139,7 @@ def refresh_platform_status(account_id: int) -> dict:
                     raise
                 clear_auth_cache(account_id)
 
-    client.login()
+    client.login(max_attempts=STATUS_LOGIN_ATTEMPTS)
     save_auth_cache(account_id, client.export_login_info())
     try:
         return _query_status(client, account_id)
