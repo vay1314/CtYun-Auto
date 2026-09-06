@@ -1,3 +1,5 @@
+import json
+
 try:
     from protocols import CtYunProtocolClient, ProtocolError
 except ImportError:
