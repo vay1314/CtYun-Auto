@@ -60,6 +60,9 @@ class RemoteOcrSolver:
                 except ValueError:
                     instance.debug_limit = DEFAULT_CAPTCHA_LOG_LIMIT
                 instance.session = requests.Session()
+                instance.session.headers.update(
+                    {"Referer": "https://pc.ctyun.cn/"}
+                )
                 cls._instance = instance
         return cls._instance
 
