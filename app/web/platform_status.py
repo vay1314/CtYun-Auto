@@ -1,11 +1,10 @@
-import json
-
 try:
-    from protocols import CtYunProtocolClient
+    from protocols import CtYunProtocolClient, ProtocolError
 except ImportError:
-    from ..protocols import CtYunProtocolClient
+    from ..protocols import CtYunProtocolClient, ProtocolError
 
 from .accounts import get_account_secret
+from .auth_cache import clear_auth_cache, load_auth_cache, save_auth_cache
 from .db import database, now_text
 
 
@@ -14,6 +13,7 @@ PLATFORM_TASKS = {
     "usage": {"id": 1003, "label": "使用 1 小时", "names": {"使用1小时"}},
     "chat": {"id": 1004, "label": "AI 对话", "names": {"与AI对话1次", "AI对话"}},
 }
+AUTH_ERROR_CODES = {"40010", "401", "403", "-401", "-403"}
 
 
 def _normalize_task(task: dict | None, definition: dict) -> dict:
@@ -105,6 +105,16 @@ def save_platform_status_error(account_id: int, message: str) -> None:
         )
 
 
+def _is_auth_error(error: ProtocolError) -> bool:
+    return str(error.code) in AUTH_ERROR_CODES
+
+
+def _query_status(client: CtYunProtocolClient, account_id: int) -> dict:
+    tasks = _match_tasks(client.get_task_list())
+    total_points = client.get_user_points()
+    return save_platform_status(account_id, total_points, tasks)
+
+
 def refresh_platform_status(account_id: int) -> dict:
     account = get_account_secret(account_id)
     if not account:
@@ -112,10 +122,28 @@ def refresh_platform_status(account_id: int) -> dict:
     client = CtYunProtocolClient(
         account["username"], account["password"], account["device_code"]
     )
+    cached = load_auth_cache(account_id)
+    if cached:
+        try:
+            client.restore_login_info(cached)
+        except ProtocolError:
+            clear_auth_cache(account_id)
+        else:
+            try:
+                return _query_status(client, account_id)
+            except ProtocolError as error:
+                if not _is_auth_error(error):
+                    raise
+                clear_auth_cache(account_id)
+
     client.login()
-    tasks = _match_tasks(client.get_task_list())
-    total_points = client.get_user_points()
-    return save_platform_status(account_id, total_points, tasks)
+    save_auth_cache(account_id, client.export_login_info())
+    try:
+        return _query_status(client, account_id)
+    except ProtocolError as error:
+        if _is_auth_error(error):
+            clear_auth_cache(account_id)
+        raise
 
 
 def list_platform_statuses() -> dict[int, dict]:

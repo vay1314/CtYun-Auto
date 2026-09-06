@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS account_platform_status (
     error TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS account_auth_cache (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    login_info_encrypted TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_task_runs_started_at
 ON task_runs(started_at DESC);
 

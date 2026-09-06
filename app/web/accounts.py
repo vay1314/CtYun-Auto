@@ -100,12 +100,20 @@ def save_account(
             account_id = int(cursor.lastrowid)
         else:
             existing = connection.execute(
-                "SELECT password_encrypted FROM accounts WHERE id = ?", (account_id,)
+                "SELECT username, password_encrypted, device_code FROM accounts "
+                "WHERE id = ?",
+                (account_id,),
             ).fetchone()
             if not existing:
                 raise ValueError("账号不存在")
             encrypted_password = (
                 encrypt_secret(password) if password else existing["password_encrypted"]
+            )
+            credentials_changed = bool(password) or any(
+                (
+                    existing["username"] != username,
+                    existing["device_code"] != device_code,
+                )
             )
             connection.execute(
                 "UPDATE accounts SET name = ?, username = ?, password_encrypted = ?, "
@@ -125,6 +133,10 @@ def save_account(
                     account_id,
                 ),
             )
+            if credentials_changed:
+                connection.execute(
+                    "DELETE FROM account_auth_cache WHERE account_id = ?", (account_id,)
+                )
     write_ctyun_accounts()
     return account_id
 

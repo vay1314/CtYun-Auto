@@ -71,11 +71,21 @@ class CtYunProtocolClient:
         return str(current)
 
     def _result(self, response: requests.Response, context: str) -> dict:
-        payload = require_json_object(response, context)
+        try:
+            payload = require_json_object(response, context)
+        except ProtocolError as error:
+            if response.status_code in (401, 403):
+                raise ProtocolError(
+                    f"{context}认证已失效", code=response.status_code
+                ) from error
+            raise
         code = payload.get("code", payload.get("resultCode", -1))
         if response.status_code >= 400 or code not in (0, "0"):
             message = payload.get("msg") or payload.get("resultMsg") or "未知错误"
-            raise ProtocolError(f"{context}失败：{message}", code=code)
+            error_code = (
+                response.status_code if response.status_code in (401, 403) else code
+            )
+            raise ProtocolError(f"{context}失败：{message}", code=error_code)
         return payload
 
     def _post_pc(self, path: str, *, data=None, json_data=None) -> dict:
@@ -168,6 +178,34 @@ class CtYunProtocolClient:
                 if attempt < max_attempts:
                     time.sleep(1)
         raise ProtocolError(f"云电脑登录失败：{last_error}")
+
+    def restore_login_info(self, value: dict) -> LoginInfo:
+        try:
+            info = LoginInfo(
+                user_id=int(value["userId"]),
+                tenant_id=int(value["tenantId"]),
+                secret_key=str(value["secretKey"]),
+                user_name=str(value.get("userName") or self.username),
+                bonded_device=bool(value.get("bondedDevice")),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProtocolError("登录缓存格式异常") from error
+        if info.user_id <= 0 or info.tenant_id <= 0 or not info.secret_key:
+            raise ProtocolError("登录缓存缺少有效认证信息")
+        self.login_info = info
+        return info
+
+    def export_login_info(self) -> dict:
+        info = self.login_info
+        if info is None:
+            raise ProtocolError("尚未登录，不能导出登录信息")
+        return {
+            "userId": info.user_id,
+            "tenantId": info.tenant_id,
+            "secretKey": info.secret_key,
+            "userName": info.user_name,
+            "bondedDevice": info.bonded_device,
+        }
 
     def send_sms_code(self) -> None:
         response = self.session.get(

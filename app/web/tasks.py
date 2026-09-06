@@ -209,6 +209,7 @@ class TaskManager:
                 "APP_USER": account["username"],
                 "APP_PASSWORD": account["password"],
                 "DEVICECODE": account["device_code"],
+                "CTYUN_ACCOUNT_ID": str(account["id"]),
                 "RUNNING_IN_DOCKER": "true",
                 "PYTHONUNBUFFERED": "1",
             }

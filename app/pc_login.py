@@ -306,6 +306,7 @@ def run_points_task(
                 print("[*] 登录状态失效，正在重新登录。")
                 client.login()
                 ensure_bound(client)
+                save_web_auth_cache(client)
             else:
                 raise
         time.sleep(POLL_SECONDS)
@@ -317,6 +318,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="天翼云电脑积分任务")
     parser.add_argument("--config-redeem", action="store_true", help="交互配置自动兑换")
     return parser.parse_args()
+
+
+def save_web_auth_cache(client: CtYunProtocolClient) -> None:
+    account_id = os.getenv("CTYUN_ACCOUNT_ID", "").strip()
+    if not account_id:
+        return
+    try:
+        from web.auth_cache import save_auth_cache
+
+        save_auth_cache(int(account_id), client.export_login_info())
+    except Exception as error:
+        print(f"[!] 面板认证缓存更新失败，不影响挂机任务：{error}")
 
 
 def main() -> int:
@@ -333,6 +346,7 @@ def main() -> int:
     try:
         info = client.login()
         ensure_bound(client)
+        save_web_auth_cache(client)
         print(f"[*] 云电脑登录成功：{info.user_name}")
         if args.config_redeem:
             return configure_redeem(client, config_path)
