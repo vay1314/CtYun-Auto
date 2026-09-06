@@ -172,27 +172,28 @@ input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .auth-card.compact { width: min(100%, 420px); }
 .auth-card h1 { margin-bottom: 18px; font-size: 2.1rem; }
 
-.task-launch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 15px; margin-bottom: 20px; }
+.task-launch-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; align-items: stretch; }
 .launch-card { display: flex; justify-content: space-between; gap: 18px; align-items: center; }
 .launch-card > div:first-child { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; align-items: center; }
 .launch-card .account-avatar { grid-row: span 2; }
 .launch-card small { color: var(--muted); }
 .launch-actions { display: flex; gap: 8px; }
-.platform-card { display: block; }
+.platform-card { min-width: 0; display: flex; flex-direction: column; padding: 20px; }
 .platform-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .platform-account { display: flex; align-items: center; gap: 12px; }
 .platform-account strong, .platform-account small, .points-summary strong, .points-summary small { display: block; }
 .points-summary { min-width: 88px; text-align: right; }
 .points-summary strong { margin-top: 2px; color: var(--blue-strong); font-size: 1.55rem; }
-.platform-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 19px 0 14px; }
-.platform-task { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(247, 250, 253, .72); }
+.platform-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 18px 0 13px; }
+.platform-task { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(247, 250, 253, .72); }
 .platform-task-name { display: block; min-height: 38px; font-size: .82rem; font-weight: 700; }
 .platform-task .pill { margin-bottom: 7px; }
 .platform-task small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.platform-updated { margin-bottom: 14px; color: var(--muted); font-size: .76rem; }
+.platform-updated { margin-top: auto; margin-bottom: 13px; overflow: hidden; color: var(--muted); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
 .platform-error { margin: 0 0 8px; color: var(--red); font-size: .8rem; }
-.platform-card .launch-actions { flex-wrap: wrap; }
-.platform-card .launch-actions form { margin: 0; }
+.platform-card .launch-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.platform-card .launch-actions form { min-width: 0; margin: 0; }
+.platform-card .launch-actions button { width: 100%; min-width: 0; padding-inline: 9px; white-space: nowrap; }
 .platform-card .material-symbols-rounded { font-size: 18px; }
 .inline-filter select { min-width: 160px; }
 .log-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; }
@@ -214,6 +215,7 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
 @media (max-width: 1080px) {
   .metric-grid { grid-template-columns: 1fr 1fr; }
   .split-grid, .settings-grid { grid-template-columns: 1fr; }
+  .task-launch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .sidebar { width: min(82vw, 280px); transform: translateX(-100%); box-shadow: 20px 0 50px rgba(35, 56, 78, .16); }
@@ -244,6 +246,7 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .launch-actions button { flex: 1; }
   .platform-task-grid { grid-template-columns: 1fr; }
   .platform-task-name { min-height: 0; }
+  .task-launch-grid { grid-template-columns: 1fr; }
   .platform-card .launch-actions, .platform-card .launch-actions form, .platform-card .launch-actions button { width: 100%; }
   .page-head { align-items: flex-start; }
   .page-head > form, .page-head > .button { margin-top: 6px; }
@@ -256,6 +259,8 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .page-head > form, .page-head > .button { width: 100%; }
   .page-head button, .page-head > .button { width: 100%; }
   .panel, .metric-card { padding: 18px; }
+  .platform-card .launch-actions { grid-template-columns: 1fr 1fr; }
+  .platform-card .launch-actions form:last-child { grid-column: 1 / -1; }
   .auth-card { padding: 30px 24px; }
   .build-strip { gap: 18px; flex-direction: column; }
 }

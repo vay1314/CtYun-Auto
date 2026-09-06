@@ -40,7 +40,7 @@
   <div class="launch-actions">
     <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}>运行 AI 对话</button></form>
     <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}>运行挂机</button></form>
-    <form method="post" action="/accounts/{{ account.id }}/platform-status/refresh"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}><span class="material-symbols-rounded">sync</span>查询任务状态</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/platform-status/refresh"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}>查询任务状态</button></form>
   </div>
 </article>
 {% else %}
