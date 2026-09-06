@@ -24,7 +24,7 @@
       <div class="account-row">
         <span class="account-avatar">{{ account.name[:1] }}</span>
         <div><strong>{{ account.name }}</strong><small>{{ account.username[:3] }}****{{ account.username[-3:] }}</small></div>
-        <span class="pill {{ 'success' if account.enabled else 'neutral' }}">{{ '启用' if account.enabled else '停用' }}</span>
+        <span class="pill {{ 'neutral' if not account.enabled else ('warning' if account.device_status == 'pending' else 'success') }}">{{ '停用' if not account.enabled else ('待验证' if account.device_status == 'pending' else '启用') }}</span>
       </div>
       {% endfor %}
     </div>

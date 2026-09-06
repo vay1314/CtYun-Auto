@@ -22,9 +22,16 @@ from .accounts import (
     get_account,
     list_accounts,
     save_account,
+    set_device_status,
 )
 from .config import APP_ROOT, LOG_DIR, VERSION_FILE, ensure_directories
 from .db import database, get_setting, init_db, set_setting
+from .device_verification import (
+    VerificationSessionExpired,
+    begin_device_verification,
+    cancel_device_verification,
+    complete_device_verification,
+)
 from .security import (
     hash_password,
     new_csrf_token,
@@ -245,6 +252,11 @@ async def dashboard(request: Request):
         request,
         "dashboard.html",
         accounts=accounts,
+        ready_count=sum(
+            1
+            for account in accounts
+            if account["enabled"] and account["device_status"] != "pending"
+        ),
         runs=runs,
         ctyun=ctyun,
         running_count=len(task_manager.active),
@@ -281,6 +293,11 @@ async def status_partial(request: Request):
         request,
         "partials/status_cards.html",
         accounts=accounts,
+        ready_count=sum(
+            1
+            for account in accounts
+            if account["enabled"] and account["device_status"] != "pending"
+        ),
         runs=runs,
         ctyun=await ctyun_status(),
         running_count=len(task_manager.active),
@@ -339,7 +356,7 @@ async def account_save(request: Request):
         "pc_cron": str(form.get("pc_cron", DEFAULT_PC_CRON)),
     }
     try:
-        save_account(
+        saved_account_id = save_account(
             account_id,
             name=account_data["name"],
             username=account_data["username"],
@@ -356,8 +373,47 @@ async def account_save(request: Request):
         return render(
             request, "account_form.html", account=account_data, error=message
         )
+    saved_account = get_account(saved_account_id)
+    if (
+        saved_account
+        and saved_account["enabled"]
+        and saved_account["device_status"] == "pending"
+    ):
+        cancel_device_verification(saved_account_id)
+        try:
+            already_bound = await asyncio.to_thread(
+                begin_device_verification, saved_account_id
+            )
+        except Exception as error:
+            await supervisor_action("restart")
+            add_flash(
+                request,
+                "账号已保存，但自动设备检查失败："
+                f"{redact(str(error))}。请点击“继续验证”重试",
+                "error",
+            )
+            return RedirectResponse("/accounts", status_code=303)
+        if already_bound:
+            set_device_status(saved_account_id, "verified")
+            await supervisor_action("restart")
+            add_flash(request, "账号已保存，设备验证通过并已启动 CtYun 保活")
+            return RedirectResponse("/accounts", status_code=303)
+
+        await supervisor_action("restart")
+        request.session["device_verification"] = {
+            "account_id": saved_account_id,
+            "expires_at": int(time.time()) + 10 * 60,
+        }
+        add_flash(request, "账号已保存，短信验证码已发送")
+        return RedirectResponse(
+            f"/accounts/{saved_account_id}/device-verification", status_code=303
+        )
+
     await supervisor_action("restart")
-    add_flash(request, "账号已保存，CtYun 保活进程已重新加载配置")
+    if saved_account and not saved_account["enabled"]:
+        add_flash(request, "账号已保存；账号停用，因此没有执行登录和设备检查")
+    else:
+        add_flash(request, "账号已保存，CtYun 保活进程已重新加载配置")
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -368,9 +424,122 @@ async def account_delete(request: Request, account_id: int):
         return guard
     if not await require_csrf(request):
         return HTMLResponse("CSRF validation failed", status_code=403)
+    cancel_device_verification(account_id)
     delete_account(account_id)
     await supervisor_action("restart")
     add_flash(request, "账号已删除", "warning")
+    return RedirectResponse("/accounts", status_code=303)
+
+
+@app.post("/accounts/{account_id}/device-verification/start")
+async def device_verification_start(request: Request, account_id: int):
+    guard = auth_redirect(request)
+    if guard:
+        return guard
+    if not await require_csrf(request):
+        return HTMLResponse("CSRF validation failed", status_code=403)
+    account = get_account(account_id)
+    if not account:
+        return HTMLResponse("Account not found", status_code=404)
+    try:
+        already_bound = await asyncio.to_thread(
+            begin_device_verification, account_id
+        )
+    except Exception as error:
+        add_flash(request, f"设备验证启动失败：{redact(str(error))}", "error")
+        return RedirectResponse("/accounts", status_code=303)
+    if already_bound:
+        set_device_status(account_id, "verified")
+        await supervisor_action("restart")
+        add_flash(request, "当前设备已经绑定，无需短信验证")
+        return RedirectResponse("/accounts", status_code=303)
+    set_device_status(account_id, "pending")
+    await supervisor_action("restart")
+    request.session["device_verification"] = {
+        "account_id": account_id,
+        "expires_at": int(time.time()) + 10 * 60,
+    }
+    add_flash(request, "短信验证码已发送，请在 10 分钟内完成验证")
+    return RedirectResponse(
+        f"/accounts/{account_id}/device-verification", status_code=303
+    )
+
+
+@app.get(
+    "/accounts/{account_id}/device-verification", response_class=HTMLResponse
+)
+async def device_verification_page(request: Request, account_id: int):
+    guard = auth_redirect(request)
+    if guard:
+        return guard
+    account = get_account(account_id)
+    if not account:
+        return HTMLResponse("Account not found", status_code=404)
+    pending = request.session.get("device_verification") or {}
+    if (
+        pending.get("account_id") != account_id
+        or int(pending.get("expires_at") or 0) <= int(time.time())
+    ):
+        request.session.pop("device_verification", None)
+        add_flash(request, "请重新获取短信验证码", "warning")
+        return RedirectResponse("/accounts", status_code=303)
+    return render(
+        request,
+        "device_verification.html",
+        account=account,
+        masked_account=masked_username(account["username"]),
+    )
+
+
+@app.post("/accounts/{account_id}/device-verification/complete")
+async def device_verification_complete(request: Request, account_id: int):
+    guard = auth_redirect(request)
+    if guard:
+        return guard
+    if not await require_csrf(request):
+        return HTMLResponse("CSRF validation failed", status_code=403)
+    account = get_account(account_id)
+    if not account:
+        return HTMLResponse("Account not found", status_code=404)
+    pending = request.session.get("device_verification") or {}
+    if (
+        pending.get("account_id") != account_id
+        or int(pending.get("expires_at") or 0) <= int(time.time())
+    ):
+        request.session.pop("device_verification", None)
+        add_flash(request, "验证码已过期，请重新获取", "warning")
+        return RedirectResponse("/accounts", status_code=303)
+    form = await request.form()
+    code = str(form.get("verification_code", "")).strip()
+    if not code.isdigit() or not 4 <= len(code) <= 8:
+        return render(
+            request,
+            "device_verification.html",
+            account=account,
+            masked_account=masked_username(account["username"]),
+            error="请输入 4 至 8 位数字短信验证码",
+        )
+    try:
+        await asyncio.to_thread(complete_device_verification, account_id, code)
+        set_device_status(account_id, "verified")
+    except VerificationSessionExpired as error:
+        request.session.pop("device_verification", None)
+        add_flash(request, redact(str(error)), "warning")
+        return RedirectResponse("/accounts", status_code=303)
+    except Exception as error:
+        return render(
+            request,
+            "device_verification.html",
+            account=account,
+            masked_account=masked_username(account["username"]),
+            error=f"设备绑定失败：{redact(str(error))}",
+        )
+    request.session.pop("device_verification", None)
+    success, message = await supervisor_action("restart")
+    if success:
+        add_flash(request, "设备绑定成功，CtYun 保活进程已重新启动")
+    else:
+        add_flash(request, f"设备绑定成功，但 CtYun 重启失败：{message}", "warning")
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -564,7 +733,11 @@ async def api_status(request: Request):
         "version": project_version(),
         "ctyun": ctyun,
         "accounts": len(accounts),
-        "enabled_accounts": sum(1 for account in accounts if account["enabled"]),
+        "enabled_accounts": sum(
+            1
+            for account in accounts
+            if account["enabled"] and account["device_status"] != "pending"
+        ),
         "active_tasks": active,
     }
 

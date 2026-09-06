@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     chat_cron TEXT NOT NULL DEFAULT '0 3,20 * * *',
     pc_enabled INTEGER NOT NULL DEFAULT 1,
     pc_cron TEXT NOT NULL DEFAULT '0 4,6 * * *',
+    device_status TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -101,6 +102,15 @@ def init_db() -> None:
     with database() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(SCHEMA)
+        account_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        if "device_status" not in account_columns:
+            connection.execute(
+                "ALTER TABLE accounts ADD COLUMN device_status TEXT NOT NULL "
+                "DEFAULT 'unknown'"
+            )
         connection.execute("PRAGMA optimize")
         connection.execute(
             "UPDATE task_runs SET status = 'interrupted', finished_at = ?, "

@@ -63,6 +63,7 @@ def save_account(
     chat_cron: str,
     pc_enabled: bool,
     pc_cron: str,
+    require_device_verification: bool = True,
 ) -> int:
     name = name.strip()
     username = username.strip()
@@ -81,8 +82,8 @@ def save_account(
                 raise ValueError("新增账号必须填写密码")
             cursor = connection.execute(
                 "INSERT INTO accounts(name, username, password_encrypted, device_code, "
-                "enabled, chat_enabled, chat_cron, pc_enabled, pc_cron, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "enabled, chat_enabled, chat_cron, pc_enabled, pc_cron, device_status, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     username,
@@ -93,6 +94,11 @@ def save_account(
                     chat_cron,
                     int(pc_enabled),
                     pc_cron,
+                    (
+                        "pending"
+                        if require_device_verification and enabled
+                        else "unknown"
+                    ),
                     timestamp,
                     timestamp,
                 ),
@@ -100,7 +106,8 @@ def save_account(
             account_id = int(cursor.lastrowid)
         else:
             existing = connection.execute(
-                "SELECT username, password_encrypted, device_code FROM accounts "
+                "SELECT username, password_encrypted, device_code, enabled, "
+                "device_status FROM accounts "
                 "WHERE id = ?",
                 (account_id,),
             ).fetchone()
@@ -115,10 +122,20 @@ def save_account(
                     existing["device_code"] != device_code,
                 )
             )
+            device_status = existing["device_status"]
+            if credentials_changed:
+                device_status = "pending" if enabled else "unknown"
+            elif (
+                enabled
+                and not existing["enabled"]
+                and device_status != "verified"
+            ):
+                device_status = "pending"
             connection.execute(
                 "UPDATE accounts SET name = ?, username = ?, password_encrypted = ?, "
                 "device_code = ?, enabled = ?, chat_enabled = ?, chat_cron = ?, "
-                "pc_enabled = ?, pc_cron = ?, updated_at = ? WHERE id = ?",
+                "pc_enabled = ?, pc_cron = ?, device_status = ?, updated_at = ? "
+                "WHERE id = ?",
                 (
                     name,
                     username,
@@ -129,6 +146,7 @@ def save_account(
                     chat_cron,
                     int(pc_enabled),
                     pc_cron,
+                    device_status,
                     timestamp,
                     account_id,
                 ),
@@ -141,6 +159,19 @@ def save_account(
     return account_id
 
 
+def set_device_status(account_id: int, status: str) -> None:
+    if status not in {"unknown", "pending", "verified"}:
+        raise ValueError("无效的设备验证状态")
+    with database() as connection:
+        cursor = connection.execute(
+            "UPDATE accounts SET device_status = ?, updated_at = ? WHERE id = ?",
+            (status, now_text(), account_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("账号不存在")
+    write_ctyun_accounts()
+
+
 def delete_account(account_id: int) -> None:
     with database() as connection:
         connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
@@ -150,7 +181,7 @@ def delete_account(account_id: int) -> None:
 def write_ctyun_accounts() -> None:
     accounts = []
     for row in list_accounts():
-        if not row["enabled"]:
+        if not row["enabled"] or row["device_status"] == "pending":
             continue
         accounts.append(
             {
@@ -212,5 +243,6 @@ def import_environment_account() -> bool:
         chat_cron=os.getenv("CHAT_CRON", DEFAULT_CHAT_CRON),
         pc_enabled=True,
         pc_cron=os.getenv("PC_CRON", DEFAULT_PC_CRON),
+        require_device_verification=False,
     )
     return True

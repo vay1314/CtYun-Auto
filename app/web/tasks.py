@@ -167,6 +167,8 @@ class TaskManager:
             return False, "账号不存在"
         if not account["enabled"]:
             return False, "账号已禁用"
+        if account["device_status"] == "pending":
+            return False, "账号正在等待设备验证"
 
         with database() as connection:
             cursor = connection.execute(
@@ -188,6 +190,11 @@ class TaskManager:
     async def refresh_account_status(self, account_id: int) -> dict:
         lock = self.status_locks.setdefault(account_id, asyncio.Lock())
         async with lock:
+            account = get_account_secret(account_id)
+            if not account:
+                raise ValueError("账号不存在")
+            if account["device_status"] == "pending":
+                raise ValueError("账号正在等待设备验证")
             try:
                 return await asyncio.to_thread(refresh_platform_status, account_id)
             except Exception as error:
@@ -338,7 +345,7 @@ class TaskManager:
         with database() as connection:
             rows = connection.execute(
                 "SELECT id, chat_enabled, chat_cron, pc_enabled, pc_cron "
-                "FROM accounts WHERE enabled = 1"
+                "FROM accounts WHERE enabled = 1 AND device_status != 'pending'"
             ).fetchall()
             connection.execute(
                 "DELETE FROM scheduler_claims WHERE minute_key < ?",

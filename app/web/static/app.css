@@ -154,6 +154,7 @@ tbody tr:hover { background: rgba(236, 246, 253, .52); }
 .empty .button { margin-top: 8px; }
 
 .form-panel { max-width: 980px; }
+.narrow-panel { max-width: 620px; }
 fieldset { margin: 0 0 30px; padding: 0 0 30px; border: 0; border-bottom: 1px solid var(--line); }
 legend { padding: 0; margin-bottom: 20px; font-size: 1.06rem; font-weight: 800; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }

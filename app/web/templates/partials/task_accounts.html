@@ -4,7 +4,7 @@
   <div class="platform-card-head">
     <div class="platform-account">
       <span class="account-avatar">{{ account.name[:1] }}</span>
-      <span><strong>{{ account.name }}</strong><small>{{ '账号启用' if account.enabled else '账号停用' }}</small></span>
+      <span><strong>{{ account.name }}</strong><small>{{ '账号停用' if not account.enabled else ('等待设备验证' if account.device_status == 'pending' else '账号启用') }}</small></span>
     </div>
     <div class="points-summary">
       <small>当前总积分</small>
@@ -38,9 +38,9 @@
     {{ '更新时间：' ~ platform.updated_at if platform else '尚未查询平台任务状态' }}
   </div>
   <div class="launch-actions">
-    <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行 AI 对话</button></form>
-    <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled %}disabled{% endif %}>运行挂机</button></form>
-    <form method="post" action="/accounts/{{ account.id }}/platform-status/refresh"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled %}disabled{% endif %}><span class="material-symbols-rounded">sync</span>查询任务状态</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/tasks/chat/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}>运行 AI 对话</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/tasks/pc/run"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}>运行挂机</button></form>
+    <form method="post" action="/accounts/{{ account.id }}/platform-status/refresh"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" {% if not account.enabled or account.device_status == 'pending' %}disabled{% endif %}><span class="material-symbols-rounded">sync</span>查询任务状态</button></form>
   </div>
 </article>
 {% else %}

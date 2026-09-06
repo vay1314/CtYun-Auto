@@ -5,8 +5,8 @@
 </article>
 <article class="metric-card">
   <div class="metric-top"><span class="metric-icon material-symbols-rounded">account_circle</span><span class="metric-label">账号</span></div>
-  <strong class="metric-value">{{ accounts|selectattr('enabled')|list|length }}<em>/ {{ accounts|length }}</em></strong>
-  <small>启用 / 全部</small>
+  <strong class="metric-value">{{ ready_count }}<em>/ {{ accounts|length }}</em></strong>
+  <small>已就绪 / 全部</small>
 </article>
 <article class="metric-card">
   <div class="metric-top"><span class="metric-icon material-symbols-rounded">bolt</span><span class="metric-label">执行中的任务</span></div>

@@ -10,10 +10,10 @@
     {% for account in accounts %}
       <tr>
         <td data-label="账号"><strong>{{ account.name }}</strong><small>{{ masked_username(account.username) }}</small></td>
-        <td data-label="保活"><span class="pill {{ 'success' if account.enabled else 'neutral' }}">{{ '启用' if account.enabled else '停用' }}</span></td>
+        <td data-label="保活"><span class="pill {{ 'neutral' if not account.enabled else ('warning' if account.device_status == 'pending' else 'success') }}">{{ '停用' if not account.enabled else ('待设备验证' if account.device_status == 'pending' else '启用') }}</span></td>
         <td data-label="AI 对话"><span class="schedule-state">{{ account.chat_cron if account.chat_enabled else '已关闭' }}</span></td>
         <td data-label="挂机"><span class="schedule-state">{{ account.pc_cron if account.pc_enabled else '已关闭' }}</span></td>
-        <td data-label="操作" class="actions"><a href="/accounts/{{ account.id }}/edit">编辑</a><form method="post" action="/accounts/{{ account.id }}/delete" data-confirm="确定删除这个账号吗？历史任务记录会保留。"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger-link" type="submit">删除</button></form></td>
+        <td data-label="操作" class="actions"><form method="post" action="/accounts/{{ account.id }}/device-verification/start"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '继续验证' if account.enabled and account.device_status == 'pending' else '设备验证' }}</button></form><a href="/accounts/{{ account.id }}/edit">编辑</a><form method="post" action="/accounts/{{ account.id }}/delete" data-confirm="确定删除这个账号吗？历史任务记录会保留。"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger-link" type="submit">删除</button></form></td>
       </tr>
     {% endfor %}
     </tbody>

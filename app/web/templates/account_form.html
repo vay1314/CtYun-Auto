@@ -10,7 +10,7 @@
     <label>显示名称<input name="name" value="{{ account.name }}" required maxlength="60" placeholder="例如：主账号"></label>
     <label>天翼云账号<input name="username" value="{{ account.username }}" required autocomplete="username"></label>
     <label>密码<input name="password" type="password" {% if not account.id %}required{% endif %} autocomplete="new-password" placeholder="{{ '留空表示不修改' if account.id else '请输入密码' }}"></label>
-    <label>设备码<input name="device_code" value="{{ account.device_code }}" required spellcheck="false"><small>同一账号保持稳定，避免重复设备验证。</small></label>
+    <label>设备码<input name="device_code" value="{{ account.device_code }}" required spellcheck="false"><small>同一账号保持稳定；新账号或修改登录信息后会自动检查设备，必要时跳转短信验证。</small></label>
   </div><label class="switch-row"><input type="checkbox" name="enabled" {% if account.enabled %}checked{% endif %}><span>启用账号和 CtYun 保活</span></label></fieldset>
   <fieldset><legend>积分任务</legend><div class="schedule-box">
     <label class="switch-row"><input type="checkbox" name="chat_enabled" {% if account.chat_enabled %}checked{% endif %}><span>启用 AI 对话积分</span></label>
@@ -19,6 +19,6 @@
     <label class="switch-row"><input type="checkbox" name="pc_enabled" {% if account.pc_enabled %}checked{% endif %}><span>启用云电脑挂机</span></label>
     <label>Cron 计划<input name="pc_cron" value="{{ account.pc_cron }}" required spellcheck="false"><small>默认每天 04:00 和 06:00。</small></label>
   </div></fieldset>
-  <div class="form-actions"><a href="/accounts">取消</a><button class="primary" type="submit">保存并重新加载</button></div>
+  <div class="form-actions"><a href="/accounts">取消</a><button class="primary" type="submit">保存并检查设备</button></div>
 </form>
 {% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}设备验证 · ctyun-auto{% endblock %}
+{% block content %}
+<header class="page-head"><div><p class="eyebrow">账号安全</p><h1>设备验证</h1><p>短信验证码已发送到账号 {{ masked_account }}</p></div><a class="secondary button" href="/accounts">返回</a></header>
+{% if error %}<div class="form-error wide">{{ error }}</div>{% endif %}
+<form method="post" action="/accounts/{{ account.id }}/device-verification/complete" class="panel form-panel narrow-panel">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <fieldset>
+    <legend>{{ account.name }}</legend>
+    <label>短信验证码<input name="verification_code" inputmode="numeric" autocomplete="one-time-code" minlength="4" maxlength="8" pattern="[0-9]{4,8}" required autofocus placeholder="请输入短信验证码"><small>验证码有效期为 10 分钟。输错后可以直接重新提交。</small></label>
+  </fieldset>
+  <div class="form-actions"><a href="/accounts">取消</a><button class="primary" type="submit">确认绑定</button></div>
+</form>
+{% endblock %}
