@@ -106,6 +106,36 @@ func (s *Server) guard(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 func esc(v string) string { return html.EscapeString(v) }
+func formatTime(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "尚未更新"
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, v); err == nil {
+			return parsed.Format("2006-01-02 15:04:05")
+		}
+	}
+	if len(v) >= 19 && v[10] == 'T' {
+		return v[:10] + " " + v[11:19]
+	}
+	return v
+}
+func taskLabel(v string) string {
+	return map[string]string{"login": "登录云电脑", "chat": "AI 对话", "pc": "云电脑挂机", "redeem": "自动兑换"}[v]
+}
+func statusLabel(v string) string {
+	if label := map[string]string{"queued": "等待中", "running": "运行中", "success": "已完成", "failed": "失败", "stopped": "已停止", "interrupted": "已中断"}[v]; label != "" {
+		return label
+	}
+	return v
+}
+func navActive(path, target string) string {
+	if (target == "/" && path == "/") || (target != "/" && strings.HasPrefix(path, target)) {
+		return "active"
+	}
+	return ""
+}
 func checked(v bool) string {
 	if v {
 		return " checked"
@@ -140,7 +170,7 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, title, content str
 	mainClass := "auth-shell"
 	if auth {
 		mainClass = "main-shell"
-		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYun Auto</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a href="/logs"><span class="material-symbols-rounded">terminal</span><span>运行日志</span></a><a href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>ctyun-auto</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button"><span class="material-symbols-rounded">refresh</span></button></form><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon"><span class="material-symbols-rounded">power_settings_new</span></button></form></div></header><button class="sidebar-backdrop" type="button"></button>`
+		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYun Auto</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>ctyun-auto</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form></div></header><button class="sidebar-backdrop" type="button"></button>`
 	}
 	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=csrf-token content='%s'><title>%s · ctyun-auto</title><link rel=stylesheet href='/static/app.css?v=%s'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
 }
@@ -442,7 +472,7 @@ func (s *Server) taskCards(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(&b, `<div class=platform-task><span class=platform-task-name>%s</span><span class="pill %s">%s</span><small>进度 %d/%d</small></div>`, x.n, esc(t.State), esc(t.StateLabel), t.Current, t.Total)
 		}
-		fmt.Fprintf(&b, `</div><div class=platform-updated>%s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>运行 AI 对话</button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s>运行挂机</button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>查询任务状态</button></form></div></article>`, esc(p.UpdatedAt), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled))
+		fmt.Fprintf(&b, `</div><div class=platform-updated><span class="material-symbols-rounded">schedule</span>更新于 %s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/login"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">login</span>运行登录</button></form><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">forum</span>AI 对话</button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s><span class="material-symbols-rounded">desktop_windows</span>运行挂机</button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">sync</span>查询状态</button></form></div></article>`, esc(formatTime(p.UpdatedAt)), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled))
 	}
 	fmt.Fprint(w, strings.ReplaceAll(b.String(), "{{CSRF}}", esc(s.csrf(w, r))))
 }
@@ -452,7 +482,7 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	token := s.csrf(w, r)
 	r.AddCookie(&http.Cookie{Name: "ctyun_csrf", Value: security.SignCookie(s.sessionKey, token), Path: "/"})
-	content := `<header class=page-head><div><p class=eyebrow>自动化</p><h1>任务</h1></div></header><section class=task-launch-grid id=task-account-status hx-get=/partials/task-accounts hx-trigger='every 10s' hx-swap=innerHTML>`
+	content := `<header class=page-head><div><p class=eyebrow>自动化</p><h1>任务中心</h1><p class=page-subtitle>按账号查看三项平台任务进度，并独立执行登录、对话与挂机。</p></div></header><section class=task-launch-grid id=task-account-status hx-get=/partials/task-accounts hx-trigger='every 10s' hx-swap=innerHTML>`
 	var recorder strings.Builder
 	rw := responseWriter{&recorder, http.Header{}}
 	s.taskCards(&rw, r)
@@ -460,7 +490,11 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 	runs, _ := s.store.Runs(100)
 	content += `<article class="panel table-panel"><div class=panel-head><div><p class=eyebrow>历史</p><h2>运行记录</h2></div></div><div class=table-wrap><table><thead><tr><th>编号</th><th>任务</th><th>账号</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead><tbody>`
 	for _, v := range runs {
-		content += fmt.Sprintf(`<tr><td>#%d</td><td>%s</td><td>%s</td><td><span class="pill %s">%s</span></td><td>%s</td><td class=actions><a href="/logs?run_id=%d">日志</a>`, v.ID, esc(v.TaskType), esc(v.AccountName), esc(v.Status), esc(v.Status), esc(v.StartedAt), v.ID)
+		label := taskLabel(v.TaskType)
+		if label == "" {
+			label = v.TaskType
+		}
+		content += fmt.Sprintf(`<tr><td data-label="编号">#%d</td><td data-label="任务">%s</td><td data-label="账号">%s</td><td data-label="状态"><span class="pill %s">%s</span></td><td data-label="开始时间"><time>%s</time></td><td data-label="操作" class=actions><a href="/logs?run_id=%d">查看日志</a>`, v.ID, esc(label), esc(v.AccountName), esc(v.Status), esc(statusLabel(v.Status)), esc(formatTime(v.StartedAt)), v.ID)
 		if v.Status == "running" || v.Status == "queued" {
 			content += fmt.Sprintf(`<form method=post action="/tasks/%d/stop"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>停止</button></form>`, v.ID)
 		}
@@ -564,25 +598,63 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
+	runs, _ := s.store.Runs(200)
 	path := filepath.Join(s.dataDir, "logs", "ctyun.log")
-	if id := r.URL.Query().Get("run_id"); id != "" {
-		runs, _ := s.store.Runs(200)
-		for _, v := range runs {
-			if strconv.FormatInt(v.ID, 10) == id {
-				path = v.LogPath
+	selectedID := r.URL.Query().Get("run_id")
+	var selected storage.Run
+	if selectedID != "" {
+		for _, run := range runs {
+			if strconv.FormatInt(run.ID, 10) == selectedID {
+				selected = run
+				path = run.LogPath
 				break
 			}
 		}
 	}
 	raw, _ := os.ReadFile(path)
+	fileSize := int64(len(raw))
 	if len(raw) > 256<<10 {
 		raw = raw[len(raw)-(256<<10):]
 	}
-	attrs := ""
-	if id := r.URL.Query().Get("run_id"); id != "" {
-		attrs = ` id="log-output" data-stream="/logs/` + esc(id) + `/stream"`
+	if len(raw) == 0 {
+		raw = []byte("暂无日志输出。")
 	}
-	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>运行日志</h1></div></header><article class="panel log-panel"><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article>`
+	var sources strings.Builder
+	systemActive := "active"
+	if selected.ID != 0 {
+		systemActive = ""
+	}
+	fmt.Fprintf(&sources, `<aside class="panel log-sources"><h2>系统日志</h2><a class="%s" href="/logs"><strong>运行日志</strong><small>CtYun Auto 服务输出</small></a><h2>任务日志</h2>`, systemActive)
+	if len(runs) == 0 {
+		sources.WriteString(`<p class=log-empty>还没有任务记录</p>`)
+	}
+	for _, run := range runs {
+		active := ""
+		if run.ID == selected.ID {
+			active = "active"
+		}
+		label := taskLabel(run.TaskType)
+		if label == "" {
+			label = run.TaskType
+		}
+		fmt.Fprintf(&sources, `<a class="%s" href="/logs?run_id=%d"><span class=log-source-title><strong>#%d · %s</strong><span class="status-dot %s"></span></span><small>%s · %s</small></a>`, active, run.ID, run.ID, esc(label), esc(run.Status), esc(run.AccountName), esc(formatTime(run.StartedAt)))
+	}
+	sources.WriteString(`</aside>`)
+	logTitle := "运行日志"
+	logMeta := "CtYun Auto 服务与保活状态"
+	indicator := `<span class="live-indicator snapshot"><i></i>日志快照</span>`
+	attrs := ""
+	if selected.ID != 0 {
+		label := taskLabel(selected.TaskType)
+		if label == "" {
+			label = selected.TaskType
+		}
+		logTitle = fmt.Sprintf("#%d · %s", selected.ID, label)
+		logMeta = fmt.Sprintf("%s · %s · %s", selected.AccountName, statusLabel(selected.Status), formatTime(selected.StartedAt))
+		attrs = ` id="log-output" data-stream="/logs/` + strconv.FormatInt(selected.ID, 10) + `/stream" data-offset="` + strconv.FormatInt(fileSize, 10) + `"`
+		indicator = `<span class="live-indicator"><i></i>实时输出</span>`
+	}
+	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + sources.String() + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + indicator + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
 	s.page(w, r, "日志", content, true)
 }
 func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
@@ -610,7 +682,10 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
-	var offset int64
+	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	if offset < 0 {
+		offset = 0
+	}
 	for {
 		f, e := os.Open(run.LogPath)
 		if e == nil {

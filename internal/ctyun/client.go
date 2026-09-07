@@ -166,7 +166,7 @@ func decodeEnvelope(r *http.Response, out any) error {
 	if code == nil {
 		code = env.ResultCode
 	}
-	ok := code == nil || fmt.Sprint(code) == "0" || fmt.Sprint(code) == "<nil>"
+	ok := code == nil || fmt.Sprint(code) == "0" || fmt.Sprint(code) == "200" || fmt.Sprint(code) == "<nil>"
 	if r.StatusCode >= 400 || !ok {
 		m := env.Msg
 		if m == "" {
@@ -304,6 +304,46 @@ func (c *Client) Connect(ctx context.Context, d Desktop) (ConnectionInfo, error)
 	form := url.Values{"objId": {d.ID()}, "objType": {"0"}, "osType": {"15"}, "deviceId": {DeviceType}, "vdCommand": {""}, "ipAddress": {""}, "macAddress": {""}, "deviceCode": {c.DeviceCode}, "deviceName": {"Chrome浏览器"}, "deviceType": {DeviceType}, "deviceModel": {"Windows NT 10.0; Win64; x64"}, "appVersion": {"3.2.0"}, "sysVersion": {"Windows NT 10.0; Win64; x64"}, "clientVersion": {PCVersion}}
 	e := c.do(ctx, "POST", PCOrigin+"/api/desktop/client/connect", strings.NewReader(form.Encode()), h, &out)
 	return out.DesktopInfo, e
+}
+
+// ReportDesktopLogin mirrors the two official web-client events emitted when a
+// user opens the AI cloud desktop. The Clink login handshake remains the source
+// of truth; these events keep the platform activity service in sync.
+func (c *Client) ReportDesktopLogin(ctx context.Context, d Desktop) error {
+	if c.Profile == nil {
+		return errors.New("尚未登录")
+	}
+	now := time.Now()
+	base := map[string]any{
+		"bussiValue": 0, "eventName": "client_action", "userId": c.Profile.UserID,
+		"userAccount": c.Profile.UserName, "tenantId": c.Profile.TenantID,
+		"deviceCode": c.DeviceCode, "deviceOsType": "web",
+		"deviceOsVersion": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"deviceModel":     "PC", "clientVersionCode": "3.7.0", "clientVersionName": "3.7.0",
+		"appType": 6, "desktopId": d.ID(), "ctgDeviceType": DeviceType,
+		"ctgAppModel": "PC", "vmUuid": d.ID(), "timeInterval": now.Hour(),
+		"host": "pc.ctyun.cn",
+	}
+	events := make([]map[string]any, 0, 2)
+	for _, key := range []int{11101, 10109} {
+		event := make(map[string]any, len(base)+4)
+		for k, v := range base {
+			event[k] = v
+		}
+		ts := time.Now().UnixMilli()
+		event["bussiKey"] = key
+		event["eventTime"] = ts
+		event["opLocalTimeStamp"] = ts
+		event["uploadTimeStamp"] = ts
+		events = append(events, event)
+	}
+	raw, _ := json.Marshal(events)
+	h, e := c.signed(PCVersion, false)
+	if e != nil {
+		return e
+	}
+	h.Set("Content-Type", "application/json")
+	return c.do(ctx, "POST", PCOrigin+"/api/cdserv/client/dataservice/api/dataEvent/sendBatch", bytes.NewReader(raw), h, nil)
 }
 func (c *Client) points(ctx context.Context, method, path string, query url.Values, body any, out any) error {
 	h, e := c.signed(PointsVersion, true)

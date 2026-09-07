@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -83,6 +84,29 @@ func userInfo(p Profile) []byte {
 	raw, _ := json.Marshal(map[string]any{"type": 1, "userName": p.UserName, "userInfo": "", "userId": p.UserID})
 	return clinkMessage(118, raw, true)
 }
+
+func mainClientLoginInfo(info ConnectionInfo, p Profile, deviceCode string) []byte {
+	values := [][]byte{
+		[]byte(info.Token),
+		[]byte(DeviceType),
+		[]byte(deviceCode),
+		[]byte(p.UserName),
+	}
+	size := 36
+	for _, value := range values {
+		size += len(value) + 1
+	}
+	body := make([]byte, size)
+	binary.LittleEndian.PutUint32(body, info.DesktopID)
+	offset := 36
+	for i, value := range values {
+		binary.LittleEndian.PutUint32(body[4+i*8:], uint32(len(value)+1))
+		binary.LittleEndian.PutUint32(body[8+i*8:], uint32(offset))
+		copy(body[offset:], value)
+		offset += len(value) + 1
+	}
+	return clinkMessage(112, body, false)
+}
 func splitHost(v string) (string, string) {
 	i := strings.LastIndex(v, ":")
 	if i > 0 {
@@ -90,39 +114,112 @@ func splitHost(v string) (string, string) {
 	}
 	return v, "443"
 }
-func RunClink(ctx context.Context, info ConnectionInfo, p Profile, notify func(string)) error {
+
+type ConnectionRefresher func(context.Context) (ConnectionInfo, error)
+
+func RunClink(ctx context.Context, info ConnectionInfo, p Profile, deviceCode string, refresh ConnectionRefresher, notify func(string)) error {
+	return runClink(ctx, info, p, deviceCode, refresh, notify, false)
+}
+
+// ActivateClink completes one official desktop login handshake and then returns.
+func ActivateClink(ctx context.Context, info ConnectionInfo, p Profile, deviceCode string, notify func(string)) error {
+	return runClink(ctx, info, p, deviceCode, nil, notify, true)
+}
+
+func waitClink(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func preemptionType(value uint16) bool {
+	return value == 119 || value == 120 || value == 137
+}
+
+func preemptionClose(err error) (string, bool) {
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return "", false
+	}
+	reason := strings.TrimSpace(closeErr.Text)
+	lower := strings.ToLower(reason)
+	if closeErr.Code == 1000 || closeErr.Code == 1001 || closeErr.Code == 4001 || strings.Contains(lower, "preempt") || strings.Contains(lower, "conflict") {
+		if reason == "" {
+			reason = "无附加说明"
+		}
+		return fmt.Sprintf("WebSocket 关闭码 %d（%s）", closeErr.Code, reason), true
+	}
+	return "", false
+}
+
+func runClink(ctx context.Context, info ConnectionInfo, p Profile, deviceCode string, refresh ConnectionRefresher, notify func(string), oneShot bool) error {
 	if notify == nil {
 		notify = func(string) {}
 	}
-	host, port := splitHost(info.ClinkLVSOutHost)
-	endpoint := url.URL{Scheme: "wss", Host: info.ClinkLVSOutHost, Path: fmt.Sprintf("/clinkProxy/%d/MAIN", info.DesktopID)}
-	dial := websocket.Dialer{HandshakeTimeout: 15 * time.Second, Subprotocols: []string{"binary"}, Proxy: http.ProxyFromEnvironment, TLSClientConfig: clinkTLS(host)}
+	firstCycle := true
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if !firstCycle && refresh != nil {
+			notify("正在刷新连接凭据")
+			fresh, e := refresh(ctx)
+			if e != nil {
+				notify("刷新连接凭据失败，5 秒后重试：" + e.Error())
+				if e = waitClink(ctx, 5*time.Second); e != nil {
+					return e
+				}
+				continue
+			}
+			info = fresh
+			notify("连接凭据已刷新")
+		}
+		firstCycle = false
+		if info.DesktopID == 0 || strings.TrimSpace(info.ClinkLVSOutHost) == "" {
+			return errors.New("Clink 连接参数不完整")
+		}
+		host, port := splitHost(info.ClinkLVSOutHost)
+		endpoint := url.URL{Scheme: "wss", Host: info.ClinkLVSOutHost, Path: fmt.Sprintf("/clinkProxy/%d/MAIN", info.DesktopID)}
+		dial := websocket.Dialer{HandshakeTimeout: 15 * time.Second, Subprotocols: []string{"binary"}, Proxy: http.ProxyFromEnvironment, TLSClientConfig: clinkTLS(host)}
 		notify("连接中")
 		ws, _, e := dial.DialContext(ctx, endpoint.String(), http.Header{"Origin": {"https://pc.ctyun.cn"}})
 		if e != nil {
 			notify("重试中：" + e.Error())
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(5 * time.Second):
-				continue
+			if e = waitClink(ctx, 5*time.Second); e != nil {
+				return e
 			}
+			continue
+		}
+		var writeMu sync.Mutex
+		write := func(messageType int, data []byte) error {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return ws.WriteMessage(messageType, data)
 		}
 		handshake := map[string]any{"type": 1, "ssl": 1, "host": host, "port": port, "ca": info.CACert, "cert": info.ClientCert, "key": info.ClientKey, "servername": info.Host + ":" + info.Port, "oqs": 0}
 		raw, _ := json.Marshal(handshake)
-		_ = ws.WriteMessage(websocket.TextMessage, raw)
+		_ = write(websocket.TextMessage, raw)
 		time.Sleep(500 * time.Millisecond)
-		_ = ws.WriteMessage(websocket.BinaryMessage, initialPayload)
+		_ = write(websocket.BinaryMessage, initialPayload)
 		notify("在线")
+		heartbeatDone := make(chan struct{})
+		var heartbeatOnce sync.Once
+		var heartbeatStart sync.Once
+		stopHeartbeat := func() { heartbeatOnce.Do(func() { close(heartbeatDone) }) }
 		deadline := time.Now().Add(60 * time.Second)
+		preempted := ""
+		var readErr error
+	readLoop:
 		for time.Now().Before(deadline) {
 			_ = ws.SetReadDeadline(time.Now().Add(15 * time.Second))
 			typ, data, err := ws.ReadMessage()
 			if err != nil {
+				readErr = err
 				break
 			}
 			if typ != websocket.BinaryMessage {
@@ -131,7 +228,7 @@ func RunClink(ctx context.Context, info ConnectionInfo, p Profile, notify func(s
 			if len(data) >= 4 && string(data[:4]) == "REDQ" {
 				reply, e := redq(data)
 				if e == nil {
-					_ = ws.WriteMessage(websocket.BinaryMessage, reply)
+					_ = write(websocket.BinaryMessage, reply)
 				}
 				continue
 			}
@@ -141,16 +238,82 @@ func RunClink(ctx context.Context, info ConnectionInfo, p Profile, notify func(s
 				if n < 0 || off+6+n > len(data) {
 					break
 				}
-				if t == 103 {
-					_ = ws.WriteMessage(websocket.BinaryMessage, userInfo(p))
-				}
-				if t == 2 {
-					_ = ws.WriteMessage(websocket.BinaryMessage, clinkMessage(3, nil, false))
+				payload := data[off+6 : off+6+n]
+				switch t {
+				case 103:
+					_ = write(websocket.BinaryMessage, userInfo(p))
+					_ = write(websocket.BinaryMessage, mainClientLoginInfo(info, p, deviceCode))
+					_ = write(websocket.BinaryMessage, clinkMessage(104, nil, false))
+					notify("桌面登录会话已激活")
+					if oneShot {
+						stopHeartbeat()
+						_ = ws.Close()
+						return nil
+					}
+					heartbeatStart.Do(func() {
+						go func() {
+							ticker := time.NewTicker(5 * time.Second)
+							defer ticker.Stop()
+							for {
+								select {
+								case <-ctx.Done():
+									return
+								case <-heartbeatDone:
+									return
+								case <-ticker.C:
+									if write(websocket.BinaryMessage, clinkMessage(7, nil, false)) != nil {
+										return
+									}
+								}
+							}
+						}()
+					})
+				case 4:
+					if len(payload) > 12 {
+						payload = payload[:12]
+					}
+					_ = write(websocket.BinaryMessage, clinkMessage(3, payload, false))
+				case 3:
+					if len(payload) >= 8 {
+						ack := make([]byte, 4)
+						copy(ack, payload[:4])
+						_ = write(websocket.BinaryMessage, clinkMessage(1, ack, false))
+					}
+				default:
+					if preemptionType(t) {
+						preempted = fmt.Sprintf("收到服务端会话通知 Type %d", t)
+						break readLoop
+					}
 				}
 				off += 6 + n
 			}
 		}
+		stopHeartbeat()
 		_ = ws.Close()
+		if oneShot {
+			if preempted != "" {
+				return errors.New(preempted)
+			}
+			return errors.New("未收到云电脑登录握手")
+		}
+		if preempted == "" {
+			if reason, ok := preemptionClose(readErr); ok {
+				preempted = reason
+			}
+		}
+		if preempted != "" {
+			notify(preempted + "，主动让位 20 分钟")
+			if e = waitClink(ctx, 20*time.Minute); e != nil {
+				return e
+			}
+			continue
+		}
+		if readErr != nil {
+			notify("连接中断，5 秒后重试：" + readErr.Error())
+			if e = waitClink(ctx, 5*time.Second); e != nil {
+				return e
+			}
+		}
 	}
 }
 

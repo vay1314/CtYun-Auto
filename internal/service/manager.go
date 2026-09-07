@@ -195,12 +195,19 @@ func (m *Manager) startAccount(a storage.Account) {
 			continue
 		}
 		workers++
-		go func(name string, info ctyun.ConnectionInfo) {
-			e := ctyun.RunClink(ctx, info, p, func(status string) { m.logf("[%s/%s] %s", a.Name, name, status) })
+		if e := c.ReportDesktopLogin(ctx, d); e != nil {
+			m.logf("[%s/%s] 登录事件上报失败，将继续使用桌面握手：%v", a.Name, d.Name(), e)
+		}
+		go func(desktop ctyun.Desktop, info ctyun.ConnectionInfo) {
+			name := desktop.Name()
+			refresh := func(refreshCtx context.Context) (ctyun.ConnectionInfo, error) {
+				return c.Connect(refreshCtx, desktop)
+			}
+			e := ctyun.RunClink(ctx, info, p, a.DeviceCode, refresh, func(status string) { m.logf("[%s/%s] %s", a.Name, name, status) })
 			if e != nil && !errors.Is(e, context.Canceled) {
 				m.logf("[%s/%s] 保活结束：%v", a.Name, name, e)
 			}
-		}(d.Name(), info)
+		}(d, info)
 	}
 	status := "保活运行中"
 	if workers == 0 {
@@ -315,7 +322,7 @@ func (m *Manager) RefreshStatus(ctx context.Context, id int64) (storage.Platform
 	return v, e
 }
 func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
-	if typ != "chat" && typ != "pc" && typ != "redeem" {
+	if typ != "login" && typ != "chat" && typ != "pc" && typ != "redeem" {
 		return 0, errors.New("未知任务类型")
 	}
 	m.mu.Lock()
@@ -346,13 +353,15 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 	f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
 	logger := log.New(f, "", log.LstdFlags)
 	defer f.Close()
-	logger.Printf("开始%s任务", map[string]string{"chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ])
+	logger.Printf("开始%s任务", map[string]string{"login": "登录 AI 云电脑", "chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ])
 	a, e := m.store.Account(accountID)
 	if e == nil {
 		var c *ctyun.Client
 		c, e = m.client(ctx, a)
 		if e == nil {
 			switch typ {
+			case "login":
+				e = m.activateDesktopLogin(ctx, a, c, logger)
 			case "chat":
 				if c.Profile != nil && c.Profile.CommonLoginReqHeader == "" {
 					c.Profile = nil
@@ -395,6 +404,67 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 	m.mu.Lock()
 	delete(m.active, runID)
 	m.mu.Unlock()
+}
+
+func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c *ctyun.Client, l *log.Logger) error {
+	desktops, e := c.ListDesktops(ctx)
+	if e != nil {
+		return e
+	}
+	m.mu.RLock()
+	liveSession := m.clients[a.ID] != nil && m.clients[a.ID].workers > 0
+	m.mu.RUnlock()
+	for _, d := range desktops {
+		if !d.Running() || d.Forbidden {
+			continue
+		}
+		if e := c.ReportDesktopLogin(ctx, d); e != nil {
+			l.Printf("平台登录事件上报未确认：%v", e)
+		} else {
+			l.Printf("平台登录事件已上报")
+		}
+		if liveSession {
+			l.Printf("复用现有保活会话，避免建立重复桌面连接")
+		} else {
+			info, connectErr := c.Connect(ctx, d)
+			if connectErr != nil {
+				l.Printf("%s 获取连接信息失败：%v", d.Name(), connectErr)
+				continue
+			}
+			handshakeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			e = ctyun.ActivateClink(handshakeCtx, info, *c.Profile, a.DeviceCode, func(status string) { l.Printf("%s：%s", d.Name(), status) })
+			cancel()
+			if e != nil {
+				l.Printf("%s 登录握手失败：%v", d.Name(), e)
+				continue
+			}
+			l.Printf("登录会话握手完成，已发送桌面登录凭据")
+		}
+		for attempt := 0; attempt < 6; attempt++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			tasks, queryErr := c.Tasks(ctx)
+			if queryErr != nil {
+				l.Printf("等待平台同步时查询失败：%v", queryErr)
+				continue
+			}
+			for _, task := range tasks {
+				if task.ID == 1002 || strings.Contains(task.Name, "登录AI云电脑") {
+					l.Printf("平台登录任务进度：%d/%d", task.Current, task.Total)
+					if task.Status == 2 || (task.Total > 0 && task.Current >= task.Total) {
+						l.Printf("平台已确认登录 AI 云电脑任务完成")
+						return nil
+					}
+				}
+			}
+		}
+		l.Printf("登录凭据已上报，平台状态可能稍后更新")
+		return nil
+	}
+	return errors.New("没有可激活登录会话的运行中云电脑")
 }
 func (m *Manager) waitUsage(ctx context.Context, c *ctyun.Client, l *log.Logger) error {
 	deadline := time.Now().Add(80 * time.Minute)

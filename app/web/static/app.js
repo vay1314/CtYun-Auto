@@ -51,7 +51,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const output = document.querySelector("#log-output[data-stream]");
   if (!output) return;
-  const stream = new EventSource(output.dataset.stream);
+  const streamUrl = new URL(output.dataset.stream, window.location.origin);
+  streamUrl.searchParams.set("offset", output.dataset.offset || "0");
+  const stream = new EventSource(streamUrl);
   stream.onmessage = (event) => {
     if (output.textContent === "暂无日志输出。") output.textContent = "";
     output.textContent += JSON.parse(event.data);
@@ -83,19 +85,19 @@ document.addEventListener("DOMContentLoaded", () => {
   context.registerTool({
     name: "run_ctyun_account_task",
     title: "运行账号任务",
-    description: "为指定账号启动 AI 对话积分或云电脑挂机任务。",
+    description: "为指定账号启动登录云电脑、AI 对话或云电脑挂机任务。",
     inputSchema: {
       type: "object",
       properties: {
         accountId: { type: "integer", minimum: 1 },
-        taskType: { type: "string", enum: ["chat", "pc"] },
+        taskType: { type: "string", enum: ["login", "chat", "pc"] },
       },
       required: ["accountId", "taskType"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, untrustedContentHint: false },
     async execute(input) {
-      if (!Number.isInteger(input.accountId) || !["chat", "pc"].includes(input.taskType)) {
+      if (!Number.isInteger(input.accountId) || !["login", "chat", "pc"].includes(input.taskType)) {
         throw new Error("账号编号或任务类型无效");
       }
       const response = await fetch(`/api/accounts/${input.accountId}/tasks/${input.taskType}`, {
