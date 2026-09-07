@@ -72,7 +72,6 @@ document.addEventListener("DOMContentLoaded", () => {
     output.scrollTop = 0;
   };
   stream.addEventListener("done", () => stream.close());
-  stream.onerror = () => stream.close();
 });
 
 (() => {

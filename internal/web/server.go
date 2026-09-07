@@ -55,6 +55,8 @@ func (s *Server) routes(staticDir string) {
 	s.mux.HandleFunc("/accounts/", s.accountRoute)
 	s.mux.HandleFunc("/accounts", s.accounts)
 	s.mux.HandleFunc("/partials/status", s.statusPartial)
+	s.mux.HandleFunc("/partials/accounts", s.accountsPartial)
+	s.mux.HandleFunc("/partials/log-sources", s.logSourcesPartial)
 	s.mux.HandleFunc("/partials/task-accounts", s.taskCards)
 	s.mux.HandleFunc("/tasks/", s.taskRoute)
 	s.mux.HandleFunc("/tasks", s.tasks)
@@ -365,15 +367,29 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
+	var b strings.Builder
+	b.WriteString(`<header class=page-head><div><p class=eyebrow>配置</p><h1>账号</h1></div><a class="primary button" href=/accounts/new>添加账号</a></header>`)
+	b.WriteString(s.accountTable())
+	s.page(w, r, "账号", b.String(), true)
+}
+func (s *Server) accountTable() string {
 	values, _ := s.store.Accounts()
 	var b strings.Builder
-	b.WriteString(`<header class=page-head><div><p class=eyebrow>配置</p><h1>账号</h1></div><a class="primary button" href=/accounts/new>添加账号</a></header><article class="panel table-panel"><div class=table-wrap><table><thead><tr><th>账号</th><th>保活</th><th>AI 对话</th><th>挂机</th><th>操作</th></tr></thead><tbody>`)
+	b.WriteString(`<article id=account-table class="panel table-panel" hx-get=/partials/accounts hx-trigger="every 5s" hx-swap=outerHTML><div class=table-wrap><table><thead><tr><th>账号</th><th>保活</th><th>AI 对话</th><th>挂机</th><th>操作</th></tr></thead><tbody>`)
 	for _, a := range values {
 		status := s.manager.AccountStatus(a.ID)
 		fmt.Fprintf(&b, `<tr><td><strong>%s</strong><small>%s</small></td><td><span class="pill %s">%s</span><small>%s</small></td><td>%s</td><td>%s</td><td class=actions><a href="/accounts/%d/edit">编辑</a><a href="/accounts/%d/redeem">兑换</a><form method=post action="/accounts/%d/device-verification/start"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=link-button>设备验证</button></form><form method=post action="/accounts/%d/delete"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>删除</button></form></td></tr>`, esc(a.Name), esc(mask(a.Username)), map[bool]string{true: "success", false: "warning"}[a.Enabled], map[bool]string{true: "启用", false: "停用"}[a.Enabled], esc(status), esc(a.ChatCron), esc(a.PCCron), a.ID, a.ID, a.ID, a.ID)
 	}
 	b.WriteString(`</tbody></table></div></article>`)
-	s.page(w, r, "账号", b.String(), true)
+	return b.String()
+}
+func (s *Server) accountsPartial(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	content := strings.ReplaceAll(s.accountTable(), "{{CSRF}}", esc(s.csrf(w, r)))
+	_, _ = io.WriteString(w, content)
 }
 func mask(v string) string {
 	if len(v) < 6 {
@@ -707,31 +723,10 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	} else {
 		raw = []byte(reverseLogText(string(raw)))
 	}
-	var sources strings.Builder
-	systemActive := "active"
-	if selected.ID != 0 {
-		systemActive = ""
-	}
-	fmt.Fprintf(&sources, `<aside class="panel log-sources"><h2>系统日志</h2><a class="%s" href="/logs"><strong>运行日志</strong><small>CtYun Auto 服务输出</small></a><h2>任务日志</h2>`, systemActive)
-	if len(runs) == 0 {
-		sources.WriteString(`<p class=log-empty>还没有任务记录</p>`)
-	}
-	for _, run := range runs {
-		active := ""
-		if run.ID == selected.ID {
-			active = "active"
-		}
-		label := taskLabel(run.TaskType)
-		if label == "" {
-			label = run.TaskType
-		}
-		fmt.Fprintf(&sources, `<a class="%s" href="/logs?run_id=%d"><span class=log-source-title><strong>#%d · %s</strong><span class="status-dot %s"></span></span><small>%s · %s</small></a>`, active, run.ID, run.ID, esc(label), esc(run.Status), esc(run.AccountName), esc(formatTime(run.StartedAt)))
-	}
-	sources.WriteString(`</aside>`)
 	logTitle := "运行日志"
 	logMeta := "CtYun Auto 服务与保活状态"
-	indicator := `<span class="live-indicator snapshot"><i></i>日志快照</span>`
-	attrs := ""
+	indicator := `<span class="live-indicator"><i></i>实时输出</span>`
+	attrs := ` id="log-output" data-stream="/logs/system/stream" data-offset="` + strconv.FormatInt(fileSize, 10) + `"`
 	if selected.ID != 0 {
 		label := taskLabel(selected.TaskType)
 		if label == "" {
@@ -742,8 +737,45 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		attrs = ` id="log-output" data-stream="/logs/` + strconv.FormatInt(selected.ID, 10) + `/stream" data-offset="` + strconv.FormatInt(fileSize, 10) + `"`
 		indicator = `<span class="live-indicator"><i></i>实时输出</span>`
 	}
-	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + sources.String() + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + indicator + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
+	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + s.logSources(runs, selected.ID) + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + indicator + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
 	s.page(w, r, "日志", content, true)
+}
+func (s *Server) logSources(runs []storage.Run, selectedID int64) string {
+	var sources strings.Builder
+	partialURL := "/partials/log-sources"
+	if selectedID != 0 {
+		partialURL += "?run_id=" + strconv.FormatInt(selectedID, 10)
+	}
+	systemActive := "active"
+	if selectedID != 0 {
+		systemActive = ""
+	}
+	fmt.Fprintf(&sources, `<aside id=log-sources class="panel log-sources" hx-get="%s" hx-trigger="every 5s" hx-swap=outerHTML><h2>系统日志</h2><a class="%s" href="/logs"><strong>运行日志</strong><small>CtYun Auto 服务输出</small></a><h2>任务日志</h2>`, partialURL, systemActive)
+	if len(runs) == 0 {
+		sources.WriteString(`<p class=log-empty>还没有任务记录</p>`)
+	}
+	for _, run := range runs {
+		active := ""
+		if run.ID == selectedID {
+			active = "active"
+		}
+		label := taskLabel(run.TaskType)
+		if label == "" {
+			label = run.TaskType
+		}
+		fmt.Fprintf(&sources, `<a class="%s" href="/logs?run_id=%d"><span class=log-source-title><strong>#%d · %s</strong><span class="status-dot %s"></span></span><small>%s · %s</small></a>`, active, run.ID, run.ID, esc(label), esc(run.Status), esc(run.AccountName), esc(formatTime(run.StartedAt)))
+	}
+	sources.WriteString(`</aside>`)
+	return sources.String()
+}
+func (s *Server) logSourcesPartial(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) {
+		return
+	}
+	selectedID, _ := strconv.ParseInt(r.URL.Query().Get("run_id"), 10, 64)
+	runs, _ := s.store.Runs(200)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, s.logSources(runs, selectedID))
 }
 func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
@@ -755,17 +787,22 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(parts[1], 10, 64)
-	runs, _ := s.store.Runs(500)
-	var run storage.Run
-	for _, v := range runs {
-		if v.ID == id {
-			run = v
-			break
+	run := storage.Run{}
+	path := filepath.Join(s.dataDir, "logs", "ctyun.log")
+	systemLog := parts[1] == "system"
+	if !systemLog {
+		runs, _ := s.store.Runs(500)
+		for _, v := range runs {
+			if v.ID == id {
+				run = v
+				path = v.LogPath
+				break
+			}
 		}
-	}
-	if run.ID == 0 {
-		http.NotFound(w, r)
-		return
+		if run.ID == 0 {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -775,7 +812,7 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	for {
-		f, e := os.Open(run.LogPath)
+		f, e := os.Open(path)
 		if e == nil {
 			_, _ = f.Seek(offset, io.SeekStart)
 			raw, _ := io.ReadAll(f)
@@ -788,17 +825,19 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		runs, _ = s.store.Runs(500)
-		active := false
-		for _, v := range runs {
-			if v.ID == id && (v.Status == "running" || v.Status == "queued") {
-				active = true
-				break
+		if !systemLog {
+			runs, _ := s.store.Runs(500)
+			active := false
+			for _, v := range runs {
+				if v.ID == id && (v.Status == "running" || v.Status == "queued") {
+					active = true
+					break
+				}
 			}
-		}
-		if !active {
-			fmt.Fprint(w, "event: done\ndata: true\n\n")
-			return
+			if !active {
+				fmt.Fprint(w, "event: done\ndata: true\n\n")
+				return
+			}
 		}
 		select {
 		case <-r.Context().Done():

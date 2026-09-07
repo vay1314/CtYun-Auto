@@ -258,13 +258,21 @@ func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.D
 		return desktop, nil
 	}
 	if notify != nil {
-		notify(fmt.Sprintf("云电脑处于“%s”，正在自动开机", desktop.StatusText()))
+		notify(fmt.Sprintf("云电脑处于“%s”，正在自动唤醒", desktop.StatusText()))
+	}
+	// CtYun 上游在桌面未运行时直接调用 connect；平台会由该请求启动或
+	// 唤醒桌面。先复用这条已验证路径，再用 operate 作为兼容性兜底。
+	if info, e := c.Connect(ctx, desktop); e == nil && info.Ready() {
+		if notify != nil {
+			notify("云电脑连接已就绪，正在建立保活连接")
+		}
+		return desktop, nil
 	}
 	if e := c.PowerOn(ctx, desktop); e != nil {
 		return desktop, fmt.Errorf("下发开机指令：%w", e)
 	}
 	if notify != nil {
-		notify("开机指令已下发，正在等待云电脑就绪")
+		notify("唤醒请求已发送，正在等待云电脑就绪")
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -279,6 +287,13 @@ func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.D
 		case <-timer.C:
 			return desktop, fmt.Errorf("等待开机超过 5 分钟，最后状态为“%s”", lastStatus)
 		case <-ticker.C:
+			// status 判断连接凭据是否真正就绪，pageDesktop 则用于展示电源状态。
+			if info, statusErr := c.DesktopConnectionStatus(ctx, desktop); statusErr == nil && info.Ready() {
+				if notify != nil {
+					notify("云电脑连接已就绪，正在建立保活连接")
+				}
+				return desktop, nil
+			}
 			values, e := c.ListDesktops(ctx)
 			if e != nil {
 				if notify != nil {

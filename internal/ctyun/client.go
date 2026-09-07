@@ -95,6 +95,11 @@ type ConnectionInfo struct {
 	ClientKey       string `json:"clientKey"`
 	Token           string `json:"token"`
 }
+
+func (c ConnectionInfo) Ready() bool {
+	return c.DesktopID != 0 && (strings.TrimSpace(c.ClinkLVSOutHost) != "" || strings.TrimSpace(c.Host) != "")
+}
+
 type Task struct {
 	ID      int    `json:"taskDefId"`
 	Name    string `json:"taskDefName"`
@@ -353,6 +358,22 @@ func (c *Client) Connect(ctx context.Context, d Desktop) (ConnectionInfo, error)
 	return out.DesktopInfo, e
 }
 
+func (c *Client) DesktopConnectionStatus(ctx context.Context, d Desktop) (ConnectionInfo, error) {
+	if d.ID() == "" {
+		return ConnectionInfo{}, errors.New("云电脑缺少设备编号")
+	}
+	h, e := c.signed(PCVersion, false)
+	if e != nil {
+		return ConnectionInfo{}, e
+	}
+	query := url.Values{"desktopId": {d.ID()}, "specifiedCertCategory": {"1"}}
+	var out struct {
+		DesktopInfo ConnectionInfo `json:"desktopInfo"`
+	}
+	e = c.do(ctx, "GET", PCOrigin+"/api/desktop/client/status?"+query.Encode(), nil, h, &out)
+	return out.DesktopInfo, e
+}
+
 func (c *Client) PowerOn(ctx context.Context, d Desktop) error {
 	if d.ID() == "" {
 		return errors.New("云电脑缺少设备编号")
@@ -362,17 +383,8 @@ func (c *Client) PowerOn(ctx context.Context, d Desktop) error {
 		return e
 	}
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
-	objID := d.ObjectID
-	if objID == "" {
-		objID = d.PoolID
-	}
-	if objID == "" {
-		objID = d.ID()
-	}
 	form := url.Values{
 		"desktopId":     {d.ID()},
-		"objId":         {objID},
-		"objType":       {strconv.Itoa(d.ObjectType)},
 		"operationType": {"1"},
 	}
 	e = c.do(ctx, "POST", PCOrigin+"/api/desktop/client/operate", strings.NewReader(form.Encode()), h, nil)
