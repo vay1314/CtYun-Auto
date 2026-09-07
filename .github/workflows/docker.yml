@@ -9,9 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  CTYUN_REPO: https://github.com/leleji/CtYun.git
-
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
@@ -34,17 +31,6 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve latest upstream CtYun revision
-        id: upstream
-        shell: bash
-        run: |
-          revision="$(git ls-remote "$CTYUN_REPO" refs/heads/master | awk 'NR == 1 {print $1}')"
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Unable to resolve the latest CtYun master revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Set image name
         id: image
@@ -80,8 +66,7 @@ jobs:
             type=raw,value=v${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            io.ctyun.upstream.repository=https://github.com/leleji/CtYun
-            io.ctyun.upstream.revision=${{ steps.upstream.outputs.revision }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -91,8 +76,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            CTYUN_REPO=${{ env.CTYUN_REPO }}
-            CTYUN_REF=${{ steps.upstream.outputs.revision }}
             APP_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
