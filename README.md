@@ -14,7 +14,7 @@ docker run -d \
   -p 9845:9845 \
   -v "$(pwd)/ctyunkeeper-data:/app/data" \
   --restart unless-stopped \
-  yin26287903/ctyun-auto:latest
+  yin26287903/ctyun-keeper:latest
 ```
 
 打开 `http://服务器IP:9845`，首次访问先设置至少 8 位的管理密码，然后在“账号管理”添加天翼云账号。设备触发短信验证时，页面会自动进入验证码输入流程。
@@ -24,8 +24,8 @@ docker run -d \
 ## 从源码构建
 
 ```bash
-git clone https://github.com/yin26287903/ctyun-auto.git
-cd ctyun-auto
+git clone https://github.com/vay1314/CtYun-Keeper.git
+cd ctyun-keeper
 sh deploy.sh
 ```
 
@@ -34,14 +34,14 @@ sh deploy.sh
 ```bash
 docker build -f app/Dockerfile \
   --build-arg APP_VERSION="$(cat VERSION)" \
-  -t ctyun-auto:local .
+  -t ctyun-keeper:local .
 ```
 
 本地 Go 检查：
 
 ```bash
 go test ./...
-go build ./cmd/ctyun-auto
+go build ./cmd/ctyun-keeper
 ```
 
 ## Web 使用流程
