@@ -15,3 +15,17 @@ func TestFormatTime(t *testing.T) {
 		}
 	}
 }
+
+func TestReverseLogText(t *testing.T) {
+	tests := map[string]string{
+		"":                         "",
+		"one":                      "one",
+		"old\nnew\n":               "new\nold\n",
+		"old\r\nmiddle\r\nnew\r\n": "new\nmiddle\nold\n",
+	}
+	for input, want := range tests {
+		if got := reverseLogText(input); got != want {
+			t.Errorf("reverseLogText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

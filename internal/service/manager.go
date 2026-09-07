@@ -184,13 +184,36 @@ func (m *Manager) startAccount(a storage.Account) {
 		return
 	}
 	workers := 0
+	forbidden := 0
+	issues := 0
 	m.setState(a.ID, c, "正在建立保活", 0, cancel)
 	for _, d := range desktops {
-		if !d.Running() || d.Forbidden {
+		if d.Forbidden {
+			forbidden++
+			m.logf("[%s/%s] 平台禁止连接，已跳过", a.Name, d.Name())
 			continue
+		}
+		if !d.Running() {
+			var startErr error
+			d, startErr = waitForDesktopRunning(ctx, c, d, func(message string) {
+				m.logf("[%s/%s] %s", a.Name, d.Name(), message)
+				m.setState(a.ID, c, message, workers, cancel)
+			})
+			if startErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				issues++
+				m.logf("[%s/%s] 自动开机失败：%v", a.Name, d.Name(), startErr)
+				continue
+			}
 		}
 		info, e := c.Connect(ctx, d)
 		if e != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			issues++
 			m.logf("[%s/%s] 获取连接失败：%v", a.Name, d.Name(), e)
 			continue
 		}
@@ -209,11 +232,91 @@ func (m *Manager) startAccount(a storage.Account) {
 			}
 		}(d, info)
 	}
-	status := "保活运行中"
-	if workers == 0 {
-		status = "已登录，暂无运行中的云电脑"
+	if ctx.Err() != nil {
+		return
+	}
+	status := fmt.Sprintf("保活运行中（%d 台云电脑）", workers)
+	if workers > 0 && (issues > 0 || forbidden > 0) {
+		status = fmt.Sprintf("保活运行中（%d 台，%d 台未接入）", workers, issues+forbidden)
+	} else if workers == 0 {
+		switch {
+		case len(desktops) == 0:
+			status = "已登录，账号下没有云电脑"
+		case forbidden == len(desktops):
+			status = "已登录，但云电脑被平台禁止连接"
+		case issues > 0:
+			status = "已登录，云电脑自动开机或连接失败"
+		default:
+			status = "已登录，暂无可保活的云电脑"
+		}
 	}
 	m.setState(a.ID, c, status, workers, cancel)
+}
+
+func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.Desktop, notify func(string)) (ctyun.Desktop, error) {
+	if desktop.Running() {
+		return desktop, nil
+	}
+	if notify != nil {
+		notify(fmt.Sprintf("云电脑处于“%s”，正在自动开机", desktop.StatusText()))
+	}
+	if e := c.PowerOn(ctx, desktop); e != nil {
+		return desktop, fmt.Errorf("下发开机指令：%w", e)
+	}
+	if notify != nil {
+		notify("开机指令已下发，正在等待云电脑就绪")
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Minute)
+	defer timer.Stop()
+	lastStatus := desktop.StatusText()
+	for {
+		select {
+		case <-ctx.Done():
+			return desktop, ctx.Err()
+		case <-timer.C:
+			return desktop, fmt.Errorf("等待开机超过 5 分钟，最后状态为“%s”", lastStatus)
+		case <-ticker.C:
+			values, e := c.ListDesktops(ctx)
+			if e != nil {
+				if notify != nil {
+					notify("等待开机时暂时无法刷新云电脑状态")
+				}
+				continue
+			}
+			for _, current := range values {
+				if !sameDesktop(desktop, current) {
+					continue
+				}
+				desktop = current
+				if current.Forbidden {
+					return current, errors.New("云电脑被平台禁止连接")
+				}
+				if current.Running() {
+					if notify != nil {
+						notify("云电脑已开机，正在建立保活连接")
+					}
+					return current, nil
+				}
+				if current.StatusText() != lastStatus {
+					lastStatus = current.StatusText()
+					if notify != nil {
+						notify(fmt.Sprintf("正在等待云电脑就绪，当前状态为“%s”", lastStatus))
+					}
+				}
+				break
+			}
+		}
+	}
+}
+
+func sameDesktop(left, right ctyun.Desktop) bool {
+	if left.ID() != "" && left.ID() == right.ID() {
+		return true
+	}
+	return left.ObjectID != "" && left.ObjectID == right.ObjectID
 }
 func (m *Manager) setState(id int64, c *ctyun.Client, status string, workers int, cancel context.CancelFunc) {
 	m.mu.Lock()
@@ -415,8 +518,18 @@ func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c
 	liveSession := m.clients[a.ID] != nil && m.clients[a.ID].workers > 0
 	m.mu.RUnlock()
 	for _, d := range desktops {
-		if !d.Running() || d.Forbidden {
+		if d.Forbidden {
 			continue
+		}
+		if !d.Running() {
+			d, e = waitForDesktopRunning(ctx, c, d, func(message string) { l.Printf("%s：%s", d.Name(), message) })
+			if e != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				l.Printf("%s 自动开机失败：%v", d.Name(), e)
+				continue
+			}
 		}
 		if e := c.ReportDesktopLogin(ctx, d); e != nil {
 			l.Printf("平台登录事件上报未确认：%v", e)

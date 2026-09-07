@@ -36,24 +36,54 @@ type Profile struct {
 	BondedDevice                                                    bool
 }
 type Desktop struct {
-	ObjectType                                                             int `json:"objType"`
-	ObjectID, ObjectName, DesktopID, DesktopName, UseStatus, UseStatusText string
-	Forbidden                                                              bool `json:"forbiddenConnect"`
+	ObjectType    int    `json:"objType"`
+	ObjectID      string `json:"objId"`
+	ObjectName    string `json:"objName"`
+	DesktopID     string `json:"desktopId"`
+	DesktopName   string `json:"desktopName"`
+	PoolID        string `json:"poolId"`
+	PoolName      string `json:"poolName"`
+	UseStatus     string `json:"useStatus"`
+	UseStatusText string `json:"useStatusText"`
+	Forbidden     bool   `json:"forbiddenConnect"`
 }
 
 func (d Desktop) ID() string {
 	if d.DesktopID != "" {
 		return d.DesktopID
 	}
-	return d.ObjectID
+	if d.ObjectID != "" {
+		return d.ObjectID
+	}
+	if d.PoolID != "" {
+		return d.PoolID
+	}
+	return ""
 }
 func (d Desktop) Name() string {
 	if d.DesktopName != "" {
 		return d.DesktopName
 	}
-	return d.ObjectName
+	if d.ObjectName != "" {
+		return d.ObjectName
+	}
+	if d.PoolName != "" {
+		return d.PoolName
+	}
+	return ""
 }
-func (d Desktop) Running() bool { return d.UseStatus == "25" || d.UseStatusText == "运行中" }
+func (d Desktop) Running() bool {
+	return d.UseStatus == "25" || d.UseStatusText == "运行中" || d.UseStatusText == "离线运行"
+}
+func (d Desktop) StatusText() string {
+	if d.UseStatusText != "" {
+		return d.UseStatusText
+	}
+	if d.UseStatus != "" {
+		return d.UseStatus
+	}
+	return "未知"
+}
 
 type ConnectionInfo struct {
 	DesktopID       uint32 `json:"desktopId"`
@@ -293,6 +323,16 @@ func (c *Client) ListDesktops(ctx context.Context) ([]Desktop, error) {
 	h.Set("Content-Type", "application/json")
 	var d struct{ DesktopList, DesktopPoolList, PreemptionDesktopList []Desktop }
 	e := c.do(ctx, "POST", PCOrigin+"/api/desktop/client/pageDesktop", strings.NewReader(`{"getCnt":20,"desktopTypes":["1","2001","2002","2003"],"sortType":"createTimeV1"}`), h, &d)
+	for i := range d.DesktopPoolList {
+		if d.DesktopPoolList[i].ObjectType == 0 {
+			d.DesktopPoolList[i].ObjectType = 1
+		}
+	}
+	for i := range d.PreemptionDesktopList {
+		if d.PreemptionDesktopList[i].ObjectType == 0 {
+			d.PreemptionDesktopList[i].ObjectType = 2
+		}
+	}
 	return append(append(d.DesktopList, d.DesktopPoolList...), d.PreemptionDesktopList...), e
 }
 func (c *Client) Connect(ctx context.Context, d Desktop) (ConnectionInfo, error) {
@@ -301,9 +341,52 @@ func (c *Client) Connect(ctx context.Context, d Desktop) (ConnectionInfo, error)
 	}
 	h, _ := c.signed(PCVersion, false)
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
-	form := url.Values{"objId": {d.ID()}, "objType": {"0"}, "osType": {"15"}, "deviceId": {DeviceType}, "vdCommand": {""}, "ipAddress": {""}, "macAddress": {""}, "deviceCode": {c.DeviceCode}, "deviceName": {"Chrome浏览器"}, "deviceType": {DeviceType}, "deviceModel": {"Windows NT 10.0; Win64; x64"}, "appVersion": {"3.2.0"}, "sysVersion": {"Windows NT 10.0; Win64; x64"}, "clientVersion": {PCVersion}}
+	objID := d.ObjectID
+	if objID == "" {
+		objID = d.PoolID
+	}
+	if objID == "" {
+		objID = d.ID()
+	}
+	form := url.Values{"desktopId": {d.ID()}, "objId": {objID}, "objType": {strconv.Itoa(d.ObjectType)}, "osType": {"15"}, "deviceId": {DeviceType}, "vdCommand": {""}, "ipAddress": {""}, "macAddress": {""}, "deviceCode": {c.DeviceCode}, "deviceName": {"Chrome浏览器"}, "deviceType": {DeviceType}, "deviceModel": {"Windows NT 10.0; Win64; x64"}, "appVersion": {"3.2.0"}, "sysVersion": {"Windows NT 10.0; Win64; x64"}, "clientVersion": {PCVersion}, "specifiedCertCategory": {"1"}}
 	e := c.do(ctx, "POST", PCOrigin+"/api/desktop/client/connect", strings.NewReader(form.Encode()), h, &out)
 	return out.DesktopInfo, e
+}
+
+func (c *Client) PowerOn(ctx context.Context, d Desktop) error {
+	if d.ID() == "" {
+		return errors.New("云电脑缺少设备编号")
+	}
+	h, e := c.signed(PCVersion, false)
+	if e != nil {
+		return e
+	}
+	h.Set("Content-Type", "application/x-www-form-urlencoded")
+	objID := d.ObjectID
+	if objID == "" {
+		objID = d.PoolID
+	}
+	if objID == "" {
+		objID = d.ID()
+	}
+	form := url.Values{
+		"desktopId":     {d.ID()},
+		"objId":         {objID},
+		"objType":       {strconv.Itoa(d.ObjectType)},
+		"operationType": {"1"},
+	}
+	e = c.do(ctx, "POST", PCOrigin+"/api/desktop/client/operate", strings.NewReader(form.Encode()), h, nil)
+	if e == nil {
+		return nil
+	}
+	var apiErr APIError
+	if errors.As(e, &apiErr) {
+		message := apiErr.Message
+		if fmt.Sprint(apiErr.Code) == "30010" || strings.Contains(message, "已关机状态") || strings.Contains(message, "正在进行") || strings.Contains(message, "运行中") {
+			return nil
+		}
+	}
+	return e
 }
 
 // ReportDesktopLogin mirrors the two official web-client events emitted when a

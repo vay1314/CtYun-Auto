@@ -122,6 +122,23 @@ func formatTime(v string) string {
 	}
 	return v
 }
+func reverseLogText(v string) string {
+	v = strings.ReplaceAll(v, "\r\n", "\n")
+	if v == "" {
+		return ""
+	}
+	trailingNewline := strings.HasSuffix(v, "\n")
+	v = strings.TrimSuffix(v, "\n")
+	lines := strings.Split(v, "\n")
+	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
+		lines[left], lines[right] = lines[right], lines[left]
+	}
+	result := strings.Join(lines, "\n")
+	if trailingNewline {
+		result += "\n"
+	}
+	return result
+}
 func taskLabel(v string) string {
 	return map[string]string{"login": "登录云电脑", "chat": "AI 对话", "pc": "云电脑挂机", "redeem": "自动兑换"}[v]
 }
@@ -139,6 +156,19 @@ func buttonIcon(name string) string {
 		"status": `<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h5M8 16h8"/>`,
 	}[name]
 	return `<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` + path + `</svg>`
+}
+func dashboardIcon(name string) string {
+	path := map[string]string{
+		"cloud":   `<path d="M7 18h10a4 4 0 0 0 .7-7.94A6 6 0 0 0 6.26 8.1 4.5 4.5 0 0 0 7 18Z"/><path d="m9.5 13 1.7 1.7 3.5-3.7"/>`,
+		"users":   `<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>`,
+		"tasks":   `<path d="m13 2-9 12h8l-1 8 9-12h-8l1-8Z"/>`,
+		"history": `<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>`,
+		"server":  `<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/>`,
+		"uptime":  `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`,
+		"cpu":     `<rect x="7" y="7" width="10" height="10" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>`,
+		"version": `<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4.5 7.5 7.5 4 7.5-4M12 21v-9.5"/>`,
+	}[name]
+	return `<svg class="dashboard-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` + path + `</svg>`
 }
 func dashboardTaskLabel(v string) string {
 	if label := map[string]string{"login": "登陆任务", "pc": "时长任务", "chat": "AI对话任务", "redeem": "自动兑换任务"}[v]; label != "" {
@@ -264,7 +294,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'>%s</section><article class="panel info-panel"><p class=eyebrow>运行信息</p><h2>服务状态</h2><dl><div><dt>程序运行</dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt>运行架构</dt><dd>%s</dd></div><div><dt>版本</dt><dd>v%s</dd></div></dl></article>`, s.dashboardMetrics(), int(time.Since(s.manager.Started()).Seconds()), esc(runtime.GOARCH), esc(s.version))
+	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p class=page-subtitle>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'>%s</section><article class="panel info-panel"><div class="panel-head dashboard-info-head"><div class=panel-title><span class="panel-icon dashboard-panel-icon">%s</span><div><p class=eyebrow>运行信息</p><h2>服务状态</h2></div></div><span class=service-health><i></i>服务在线</span></div><dl class=service-facts><div><dt><span class=fact-icon>%s</span><span>程序运行时长</span></dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt><span class=fact-icon>%s</span><span>运行架构</span></dt><dd>%s</dd></div><div><dt><span class=fact-icon>%s</span><span>当前版本</span></dt><dd>v%s</dd></div></dl></article>`, s.dashboardMetrics(), dashboardIcon("server"), dashboardIcon("uptime"), int(time.Since(s.manager.Started()).Seconds()), dashboardIcon("cpu"), esc(runtime.GOARCH), dashboardIcon("version"), esc(s.version))
 	s.page(w, r, "仪表盘", content, true)
 }
 func (s *Server) statusPartial(w http.ResponseWriter, r *http.Request) {
@@ -284,11 +314,6 @@ func (s *Server) dashboardMetrics() string {
 	if workers > 0 {
 		keepaliveText = fmt.Sprintf("正在保活 %d 台云电脑", workers)
 	}
-	accountText := "当前没有账号运行"
-	if runningAccounts > 0 {
-		accountText = fmt.Sprintf("%d 个账号正在运行", runningAccounts)
-	}
-
 	var active []storage.Run
 	var recent *storage.Run
 	for i := range runs {
@@ -299,43 +324,41 @@ func (s *Server) dashboardMetrics() string {
 		}
 	}
 
-	activeContent := `<strong class="metric-value small">无</strong><span class="metric-note">当前没有执行中的任务</span>`
+	activeContent := `<strong class="metric-value small">当前空闲</strong><span class="metric-note">暂无正在执行的自动化任务</span>`
 	if len(active) > 0 {
 		var list strings.Builder
-		list.WriteString(`<strong class="metric-value small">正在运行</strong><ul class="metric-task-list">`)
+		fmt.Fprintf(&list, `<strong class="metric-value small">%d 项任务</strong><ul class="metric-task-list">`, len(active))
 		for _, run := range active {
 			name := run.AccountName
 			if name == "" {
 				name = fmt.Sprintf("账号 #%d", run.AccountID)
 			}
-			fmt.Fprintf(&list, `<li>%s的%s</li>`, esc(name), esc(dashboardTaskLabel(run.TaskType)))
+			fmt.Fprintf(&list, `<li><span class="task-state-dot %s"></span><span><b>%s</b><small>%s · %s</small></span></li>`, esc(run.Status), esc(name), esc(dashboardTaskLabel(run.TaskType)), esc(statusLabel(run.Status)))
 		}
 		list.WriteString(`</ul>`)
 		activeContent = list.String()
 	}
 
-	recentText := "暂无已结束的任务"
+	recentContent := `<strong class="metric-value small">暂无记录</strong><span class="metric-note">任务结束后将在这里显示结果</span>`
 	if recent != nil {
 		name := recent.AccountName
 		if name == "" {
 			name = fmt.Sprintf("账号 #%d", recent.AccountID)
 		}
-		task := dashboardTaskLabel(recent.TaskType)
-		switch recent.Status {
-		case "success":
-			recentText = fmt.Sprintf("%s已完成%s", name, task)
-		case "failed":
-			recentText = fmt.Sprintf("%s的%s执行失败", name, task)
-		case "stopped":
-			recentText = fmt.Sprintf("%s的%s已停止", name, task)
-		case "interrupted":
-			recentText = fmt.Sprintf("%s的%s已中断", name, task)
-		default:
-			recentText = fmt.Sprintf("%s的%s%s", name, task, statusLabel(recent.Status))
+		finishedAt := recent.FinishedAt
+		if finishedAt == "" {
+			finishedAt = recent.StartedAt
 		}
+		recentContent = fmt.Sprintf(`<strong class="metric-value small metric-account-name" title="%s">%s</strong><div class=metric-result><span class="pill %s">%s</span><span>%s</span></div><span class=metric-time>%s</span>`, esc(name), esc(name), esc(recent.Status), esc(statusLabel(recent.Status)), esc(dashboardTaskLabel(recent.TaskType)), esc(formatTime(finishedAt)))
 	}
 
-	return fmt.Sprintf(`<article class="panel metric-card"><small>CtYun 保活</small><strong class="metric-value small success-text">%s</strong><span class="metric-note">%s</span></article><article class="panel metric-card"><small>账号</small><strong class="metric-value small">%d 个账号</strong><span class="metric-note">%s</span></article><article class="panel metric-card metric-card-tasks"><small>执行中的任务</small>%s</article><article class="panel metric-card"><small>最近任务</small><strong class="metric-value small">%s</strong><span class="metric-note">最近一次已结束的任务</span></article>`, esc(state), esc(keepaliveText), len(accounts), esc(accountText), activeContent, esc(recentText))
+	stateTone := "success"
+	if strings.Contains(state, "异常") || strings.Contains(state, "失败") || strings.Contains(state, "错误") {
+		stateTone = "danger"
+	} else if workers == 0 {
+		stateTone = "warning"
+	}
+	return fmt.Sprintf(`<article class="panel metric-card metric-%s"><div class=metric-top><span class=metric-icon>%s</span><span class=metric-label>云电脑保活</span><i class="metric-status-dot %s"></i></div><strong class="metric-value small">%s</strong><span class="metric-note">%s</span></article><article class="panel metric-card metric-accounts"><div class=metric-top><span class=metric-icon>%s</span><span class=metric-label>账号概况</span></div><strong class=metric-number>%d<em>个账号</em></strong><span class=metric-note><b>%d</b> 个正在运行</span></article><article class="panel metric-card metric-card-tasks"><div class=metric-top><span class=metric-icon>%s</span><span class=metric-label>执行中的任务</span></div>%s</article><article class="panel metric-card metric-recent"><div class=metric-top><span class=metric-icon>%s</span><span class=metric-label>最近任务</span></div>%s</article>`, stateTone, dashboardIcon("cloud"), stateTone, esc(state), esc(keepaliveText), dashboardIcon("users"), len(accounts), runningAccounts, dashboardIcon("tasks"), activeContent, dashboardIcon("history"), recentContent)
 }
 
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +704,8 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(raw) == 0 {
 		raw = []byte("暂无日志输出。")
+	} else {
+		raw = []byte(reverseLogText(string(raw)))
 	}
 	var sources strings.Builder
 	systemActive := "active"
@@ -757,7 +782,7 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 			offset, _ = f.Seek(0, io.SeekCurrent)
 			f.Close()
 			if len(raw) > 0 {
-				fmt.Fprintf(w, "data: %q\n\n", string(raw))
+				fmt.Fprintf(w, "data: %q\n\n", reverseLogText(string(raw)))
 				if flusher != nil {
 					flusher.Flush()
 				}

@@ -68,8 +68,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const stream = new EventSource(streamUrl);
   stream.onmessage = (event) => {
     if (output.textContent === "暂无日志输出。") output.textContent = "";
-    output.textContent += JSON.parse(event.data);
-    output.scrollTop = output.scrollHeight;
+    output.textContent = JSON.parse(event.data) + output.textContent;
+    output.scrollTop = 0;
   };
   stream.addEventListener("done", () => stream.close());
   stream.onerror = () => stream.close();
