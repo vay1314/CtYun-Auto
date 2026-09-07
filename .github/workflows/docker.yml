@@ -42,7 +42,7 @@ jobs:
             echo "Repository variable DOCKERHUB_USERNAME is not configured" >&2
             exit 1
           fi
-          echo "name=${DOCKERHUB_USERNAME,,}/ctyun-auto" >> "$GITHUB_OUTPUT"
+          echo "name=${DOCKERHUB_USERNAME,,}/ctyun-keeper" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
