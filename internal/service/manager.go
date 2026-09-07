@@ -208,7 +208,9 @@ func (m *Manager) startAccount(a storage.Account) {
 				continue
 			}
 		}
-		info, e := c.Connect(ctx, d)
+		info, e := waitForConnectionInfo(ctx, c, d, func(message string) {
+			m.logf("[%s/%s] %s", a.Name, d.Name(), message)
+		}, 2*time.Minute)
 		if e != nil {
 			if ctx.Err() != nil {
 				return
@@ -224,7 +226,7 @@ func (m *Manager) startAccount(a storage.Account) {
 		go func(desktop ctyun.Desktop, info ctyun.ConnectionInfo) {
 			name := desktop.Name()
 			refresh := func(refreshCtx context.Context) (ctyun.ConnectionInfo, error) {
-				return c.Connect(refreshCtx, desktop)
+				return waitForConnectionInfo(refreshCtx, c, desktop, nil, 30*time.Second)
 			}
 			e := ctyun.RunClink(ctx, info, p, a.DeviceCode, refresh, func(status string) { m.logf("[%s/%s] %s", a.Name, name, status) })
 			if e != nil && !errors.Is(e, context.Canceled) {
@@ -311,7 +313,7 @@ func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.D
 				}
 				if current.Running() {
 					if notify != nil {
-						notify("云电脑已开机，正在建立保活连接")
+						notify("云电脑已开机，正在等待连接凭据")
 					}
 					return current, nil
 				}
@@ -323,6 +325,42 @@ func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.D
 				}
 				break
 			}
+		}
+	}
+}
+
+func waitForConnectionInfo(ctx context.Context, c *ctyun.Client, desktop ctyun.Desktop, notify func(string), timeout time.Duration) (ctyun.ConnectionInfo, error) {
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	firstWait := true
+	var lastErr error
+	for {
+		if info, e := c.DesktopConnectionStatus(ctx, desktop); e == nil && info.Ready() {
+			return info, nil
+		} else if e != nil {
+			lastErr = e
+		}
+		if info, e := c.Connect(ctx, desktop); e == nil && info.Ready() {
+			return info, nil
+		} else if e != nil {
+			lastErr = e
+		}
+		if firstWait && notify != nil {
+			notify("云电脑已运行，正在等待平台生成 Clink 连接凭据")
+			firstWait = false
+		}
+		select {
+		case <-ctx.Done():
+			return ctyun.ConnectionInfo{}, ctx.Err()
+		case <-timer.C:
+			if lastErr != nil {
+				return ctyun.ConnectionInfo{}, fmt.Errorf("等待 Clink 连接凭据超时：%w", lastErr)
+			}
+			return ctyun.ConnectionInfo{}, errors.New("等待 Clink 连接凭据超时：平台尚未返回完整地址或证书")
+		case <-time.After(3 * time.Second):
 		}
 	}
 }
@@ -554,7 +592,7 @@ func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c
 		if liveSession {
 			l.Printf("复用现有保活会话，避免建立重复桌面连接")
 		} else {
-			info, connectErr := c.Connect(ctx, d)
+			info, connectErr := waitForConnectionInfo(ctx, c, d, func(message string) { l.Printf("%s：%s", d.Name(), message) }, 90*time.Second)
 			if connectErr != nil {
 				l.Printf("%s 获取连接信息失败：%v", d.Name(), connectErr)
 				continue

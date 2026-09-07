@@ -97,7 +97,7 @@ type ConnectionInfo struct {
 }
 
 func (c ConnectionInfo) Ready() bool {
-	return c.DesktopID != 0 && (strings.TrimSpace(c.ClinkLVSOutHost) != "" || strings.TrimSpace(c.Host) != "")
+	return c.DesktopID != 0 && strings.TrimSpace(c.ClinkLVSOutHost) != ""
 }
 
 type Task struct {

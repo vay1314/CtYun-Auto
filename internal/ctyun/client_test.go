@@ -81,3 +81,12 @@ func TestDesktopConnectionStatusUsesStatusEndpoint(t *testing.T) {
 		t.Fatalf("DesktopConnectionStatus() returned incomplete info: %#v", info)
 	}
 }
+
+func TestConnectionInfoReadyRequiresClinkProxyAddress(t *testing.T) {
+	if (ConnectionInfo{DesktopID: 123, Host: "legacy.example.test"}).Ready() {
+		t.Fatal("legacy host without clinkLvsOutHost must not be treated as Clink-ready")
+	}
+	if !(ConnectionInfo{DesktopID: 123, ClinkLVSOutHost: "proxy.example.test:443"}).Ready() {
+		t.Fatal("complete Clink connection info should be ready")
+	}
+}
