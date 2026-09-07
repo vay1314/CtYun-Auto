@@ -18,7 +18,7 @@ LABEL org.opencontainers.image.title="ctyun-auto" \
       org.opencontainers.image.description="CtYun keep-alive, points tasks and management panel" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.source="https://github.com/yin26287903/ctyun-auto"
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata su-exec \
     && addgroup -S -g 10001 ctyun \
     && adduser -S -D -H -u 10001 -G ctyun ctyun \
     && mkdir -p /app/data /app/static \
@@ -26,10 +26,12 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=builder /out/ctyun-auto /app/ctyun-auto
 COPY --chown=ctyun:ctyun app/web/static /app/static
+COPY app/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 ENV TZ=Asia/Shanghai CTYUN_DATA_DIR=/app/data CTYUN_STATIC_DIR=/app/static APP_PORT=9845
-USER ctyun
+USER root
 VOLUME ["/app/data"]
 EXPOSE 9845
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -q -T 3 -O /dev/null http://127.0.0.1:9845/health || exit 1
-ENTRYPOINT ["/app/ctyun-auto"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
