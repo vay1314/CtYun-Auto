@@ -502,6 +502,18 @@ func (m *Manager) StopTask(id int64) bool {
 }
 func (m *Manager) ActiveCount() int { m.mu.RLock(); defer m.mu.RUnlock(); return len(m.active) }
 
+func (m *Manager) RunningAccountCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, state := range m.clients {
+		if state != nil && state.workers > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (m *Manager) RedeemCatalog(ctx context.Context, id int64) ([]ctyun.Reward, []ctyun.Desktop, error) {
 	a, e := m.store.Account(id)
 	if e != nil {

@@ -3,6 +3,18 @@ document.addEventListener("submit", (event) => {
   if (message && !window.confirm(message)) event.preventDefault();
 });
 
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-password-toggle]");
+  if (!button) return;
+  const input = button.closest(".password-field")?.querySelector("input");
+  if (!input) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  button.setAttribute("aria-pressed", String(show));
+  button.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+  input.focus();
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const toggle = document.querySelector(".sidebar-toggle");
   const backdrop = document.querySelector(".sidebar-backdrop");

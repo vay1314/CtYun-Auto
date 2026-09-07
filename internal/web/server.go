@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -130,6 +131,24 @@ func statusLabel(v string) string {
 	}
 	return v
 }
+func buttonIcon(name string) string {
+	path := map[string]string{
+		"login":  `<path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>`,
+		"usage":  `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`,
+		"chat":   `<path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/>`,
+		"status": `<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h5M8 16h8"/>`,
+	}[name]
+	return `<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` + path + `</svg>`
+}
+func dashboardTaskLabel(v string) string {
+	if label := map[string]string{"login": "登陆任务", "pc": "时长任务", "chat": "AI对话任务", "redeem": "自动兑换任务"}[v]; label != "" {
+		return label
+	}
+	return "其他任务"
+}
+func passwordToggle() string {
+	return `<button class="password-toggle" type="button" data-password-toggle aria-label="显示密码" aria-pressed="false"><svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 18 18"/><path d="M10.6 6.2A10.9 10.9 0 0 1 12 6c6.5 0 10 6 10 6a18.5 18.5 0 0 1-2.1 2.8M6.6 6.6C3.6 8.4 2 12 2 12s3.5 6 10 6c1.8 0 3.3-.5 4.6-1.2"/></svg></button>`
+}
 func navActive(path, target string) string {
 	if (target == "/" && path == "/") || (target != "/" && strings.HasPrefix(path, target)) {
 		return "active"
@@ -245,34 +264,78 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	accounts, _ := s.store.Accounts()
-	runs, _ := s.store.Runs(8)
-	state, workers := s.manager.KeepaliveStatus()
-	ready := 0
-	for _, a := range accounts {
-		if a.Enabled && a.DeviceStatus != "pending" {
-			ready++
-		}
-	}
-	recent := "暂无任务记录"
-	if len(runs) > 0 {
-		recent = esc(runs[0].TaskType + " · " + runs[0].Status)
-	}
-	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'><article class="panel metric-card"><small>CtYun 保活</small><strong class=success-text>%s</strong><span>已建立 %d 个云电脑连接</span></article><article class="panel metric-card"><small>账号</small><strong>%d<small>/%d</small></strong><span>可运行 / 全部</span></article><article class="panel metric-card"><small>执行中的任务</small><strong>%d</strong><span>后台任务</span></article><article class="panel metric-card"><small>最近任务</small><strong class=small-value>%s</strong></article></section><article class="panel info-panel"><p class=eyebrow>运行信息</p><h2>服务状态</h2><dl><div><dt>程序运行</dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt>运行架构</dt><dd>Go 单进程</dd></div><div><dt>版本</dt><dd>v%s</dd></div></dl></article>`, esc(state), workers, ready, len(accounts), s.manager.ActiveCount(), recent, int(time.Since(s.manager.Started()).Seconds()), esc(s.version))
+	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'>%s</section><article class="panel info-panel"><p class=eyebrow>运行信息</p><h2>服务状态</h2><dl><div><dt>程序运行</dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt>运行架构</dt><dd>%s</dd></div><div><dt>版本</dt><dd>v%s</dd></div></dl></article>`, s.dashboardMetrics(), int(time.Since(s.manager.Started()).Seconds()), esc(runtime.GOARCH), esc(s.version))
 	s.page(w, r, "仪表盘", content, true)
 }
 func (s *Server) statusPartial(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
+	fmt.Fprint(w, s.dashboardMetrics())
+}
+
+func (s *Server) dashboardMetrics() string {
 	accounts, _ := s.store.Accounts()
-	runs, _ := s.store.Runs(1)
-	recent := "暂无"
-	if len(runs) > 0 {
-		recent = runs[0].TaskType + " · " + runs[0].Status
-	}
+	runs, _ := s.store.Runs(200)
 	state, workers := s.manager.KeepaliveStatus()
-	fmt.Fprintf(w, `<article class="panel metric-card"><small>CtYun 保活</small><strong class=success-text>%s</strong><span>已建立 %d 个云电脑连接</span></article><article class="panel metric-card"><small>账号</small><strong>%d</strong><span>已配置账号</span></article><article class="panel metric-card"><small>执行中的任务</small><strong>%d</strong><span>后台任务</span></article><article class="panel metric-card"><small>最近任务</small><strong class=small-value>%s</strong></article>`, esc(state), workers, len(accounts), s.manager.ActiveCount(), esc(recent))
+	runningAccounts := s.manager.RunningAccountCount()
+
+	keepaliveText := "当前没有云电脑正在保活"
+	if workers > 0 {
+		keepaliveText = fmt.Sprintf("正在保活 %d 台云电脑", workers)
+	}
+	accountText := "当前没有账号运行"
+	if runningAccounts > 0 {
+		accountText = fmt.Sprintf("%d 个账号正在运行", runningAccounts)
+	}
+
+	var active []storage.Run
+	var recent *storage.Run
+	for i := range runs {
+		if runs[i].Status == "queued" || runs[i].Status == "running" {
+			active = append(active, runs[i])
+		} else if recent == nil {
+			recent = &runs[i]
+		}
+	}
+
+	activeContent := `<strong class="metric-value small">无</strong><span class="metric-note">当前没有执行中的任务</span>`
+	if len(active) > 0 {
+		var list strings.Builder
+		list.WriteString(`<strong class="metric-value small">正在运行</strong><ul class="metric-task-list">`)
+		for _, run := range active {
+			name := run.AccountName
+			if name == "" {
+				name = fmt.Sprintf("账号 #%d", run.AccountID)
+			}
+			fmt.Fprintf(&list, `<li>%s的%s</li>`, esc(name), esc(dashboardTaskLabel(run.TaskType)))
+		}
+		list.WriteString(`</ul>`)
+		activeContent = list.String()
+	}
+
+	recentText := "暂无已结束的任务"
+	if recent != nil {
+		name := recent.AccountName
+		if name == "" {
+			name = fmt.Sprintf("账号 #%d", recent.AccountID)
+		}
+		task := dashboardTaskLabel(recent.TaskType)
+		switch recent.Status {
+		case "success":
+			recentText = fmt.Sprintf("%s已完成%s", name, task)
+		case "failed":
+			recentText = fmt.Sprintf("%s的%s执行失败", name, task)
+		case "stopped":
+			recentText = fmt.Sprintf("%s的%s已停止", name, task)
+		case "interrupted":
+			recentText = fmt.Sprintf("%s的%s已中断", name, task)
+		default:
+			recentText = fmt.Sprintf("%s的%s%s", name, task, statusLabel(recent.Status))
+		}
+	}
+
+	return fmt.Sprintf(`<article class="panel metric-card"><small>CtYun 保活</small><strong class="metric-value small success-text">%s</strong><span class="metric-note">%s</span></article><article class="panel metric-card"><small>账号</small><strong class="metric-value small">%d 个账号</strong><span class="metric-note">%s</span></article><article class="panel metric-card metric-card-tasks"><small>执行中的任务</small>%s</article><article class="panel metric-card"><small>最近任务</small><strong class="metric-value small">%s</strong><span class="metric-note">最近一次已结束的任务</span></article>`, esc(state), esc(keepaliveText), len(accounts), esc(accountText), activeContent, esc(recentText))
 }
 
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +371,7 @@ func (s *Server) accountForm(w http.ResponseWriter, r *http.Request, a storage.A
 		title = "编辑账号"
 		required = ""
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<input name=password type=password%s placeholder="%s"></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号和保活</span></label></fieldset><fieldset><legend>积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话积分</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用云电脑挂机</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], esc(a.DeviceCode), checked(a.Enabled), checked(a.ChatEnabled), esc(a.ChatCron), checked(a.PCEnabled), esc(a.PCCron))
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<div class=password-field><input name=password type=password%s placeholder="%s">%s</div></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号和保活</span></label></fieldset><fieldset><legend>积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话积分</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用云电脑挂机</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], passwordToggle(), esc(a.DeviceCode), checked(a.Enabled), checked(a.ChatEnabled), esc(a.ChatCron), checked(a.PCEnabled), esc(a.PCCron))
 	s.page(w, r, title, content, true)
 }
 func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
@@ -472,7 +535,7 @@ func (s *Server) taskCards(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(&b, `<div class=platform-task><span class=platform-task-name>%s</span><span class="pill %s">%s</span><small>进度 %d/%d</small></div>`, x.n, esc(t.State), esc(t.StateLabel), t.Current, t.Total)
 		}
-		fmt.Fprintf(&b, `</div><div class=platform-updated><span class="material-symbols-rounded">schedule</span>更新于 %s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/login"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">login</span>运行登录</button></form><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">forum</span>AI 对话</button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s><span class="material-symbols-rounded">desktop_windows</span>运行挂机</button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s><span class="material-symbols-rounded">sync</span>查询状态</button></form></div></article>`, esc(formatTime(p.UpdatedAt)), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled), a.ID, disabled(!a.Enabled))
+		fmt.Fprintf(&b, `</div><div class=platform-updated><span class="material-symbols-rounded">schedule</span>更新于 %s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/login"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>登陆任务</span></button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s>%s<span>时长任务</span></button></form><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>AI对话任务</span></button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>任务状态查询</span></button></form></div></article>`, esc(formatTime(p.UpdatedAt)), a.ID, disabled(!a.Enabled), buttonIcon("login"), a.ID, disabled(!a.Enabled), buttonIcon("usage"), a.ID, disabled(!a.Enabled), buttonIcon("chat"), a.ID, disabled(!a.Enabled), buttonIcon("status"))
 	}
 	fmt.Fprint(w, strings.ReplaceAll(b.String(), "{{CSRF}}", esc(s.csrf(w, r))))
 }

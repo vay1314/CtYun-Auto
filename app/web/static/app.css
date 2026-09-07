@@ -105,6 +105,9 @@ h2 { margin-bottom: 0; font-size: 1.08rem; letter-spacing: -.02em; }
 .metric-value.small { font-size: 1.25rem; letter-spacing: -.025em; }
 .metric-value em { color: var(--muted); font-size: .92rem; font-style: normal; }
 .metric-card small { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.metric-note { display: block; color: var(--muted); font-size: .84rem; }
+.metric-task-list { max-height: 82px; margin: 8px 0 0; padding-left: 18px; overflow: auto; color: #536174; font-size: .8rem; }
+.metric-task-list li + li { margin-top: 3px; }
 .status-text.running { color: var(--green); }
 .status-text.stopped { color: var(--red); }
 .split-grid { display: grid; grid-template-columns: 1fr 1.12fr; gap: 20px; margin-bottom: 20px; }
@@ -162,6 +165,14 @@ label { display: grid; gap: 7px; color: #536174; font-size: .88rem; font-weight:
 label small { color: var(--muted); font-weight: 400; }
 input, select { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; outline: none; background: rgba(255, 255, 255, .92); color: var(--text); }
 input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(89, 168, 232, .14); }
+.password-field { position: relative; }
+.password-field input { padding-right: 48px; }
+.password-toggle { position: absolute; top: 50%; right: 5px; width: 36px; height: 36px; min-height: 36px; padding: 8px; transform: translateY(-50%); display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); }
+.password-toggle:hover, .password-toggle:focus-visible { color: var(--blue-strong); background: var(--blue-soft); outline: none; }
+.password-toggle svg { width: 20px; height: 20px; }
+.password-toggle .eye-closed { display: none; }
+.password-toggle[aria-pressed="true"] .eye-open { display: none; }
+.password-toggle[aria-pressed="true"] .eye-closed { display: block; }
 .switch-row { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
 .switch-row input { width: 18px; min-height: 18px; accent-color: var(--blue-strong); }
 .schedule-box { display: grid; grid-template-columns: minmax(210px, .7fr) 1fr; gap: 24px; align-items: center; padding: 17px 0; }
@@ -194,9 +205,10 @@ input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .platform-updated { margin-top: auto; margin-bottom: 13px; display: flex; align-items: center; gap: 5px; overflow: hidden; color: var(--muted); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
 .platform-updated .material-symbols-rounded { color: #94a3b5; font-size: 15px; }
 .platform-error { margin: 0 0 8px; color: var(--red); font-size: .8rem; }
-.platform-card .launch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.platform-card .launch-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .platform-card .launch-actions form { min-width: 0; margin: 0; }
-.platform-card .launch-actions button { width: 100%; min-width: 0; padding-inline: 9px; white-space: nowrap; }
+.platform-card .launch-actions button { width: 100%; min-width: 0; padding-inline: 8px; white-space: nowrap; font-size: .78rem; }
+.button-icon { width: 17px; height: 17px; flex: 0 0 17px; }
 .platform-card .material-symbols-rounded { font-size: 18px; }
 .inline-filter select { min-width: 160px; }
 .log-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; }
@@ -230,6 +242,9 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .split-grid, .settings-grid { grid-template-columns: 1fr; }
   .task-launch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@media (max-width: 1400px) and (min-width: 761px) {
+  .task-launch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 760px) {
   .sidebar { width: min(82vw, 280px); transform: translateX(-100%); box-shadow: 20px 0 50px rgba(35, 56, 78, .16); }
   body.sidebar-open .sidebar { transform: translateX(0); }
@@ -260,6 +275,7 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .platform-task-grid { grid-template-columns: 1fr; }
   .platform-task-name { min-height: 0; }
   .task-launch-grid { grid-template-columns: 1fr; }
+  .platform-card .launch-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .platform-card .launch-actions, .platform-card .launch-actions form, .platform-card .launch-actions button { width: 100%; }
   .page-head { align-items: flex-start; }
   .page-head > form, .page-head > .button { margin-top: 6px; }
