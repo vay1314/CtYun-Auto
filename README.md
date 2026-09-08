@@ -40,6 +40,27 @@ docker run -d \
 
 宿主机端口冲突时只需修改左侧端口，例如 `-p 19845:9845`。
 
+## Windows 版本
+
+GitHub Releases 提供以下 Windows 压缩包：
+
+- `windows-amd64`：适用于绝大多数 Intel、AMD 处理器电脑。
+- `windows-arm64`：适用于 Windows ARM64 设备。
+
+下载对应 ZIP 并完整解压，目录内容如下：
+
+```text
+CtYunKeeper-vX.Y.Z-windows-amd64/
+├─ ctyun-keeper.exe
+├─ config.env
+├─ start.bat
+├─ README.txt
+├─ static/
+└─ data/
+```
+
+按需修改 `config.env` 后双击 `start.bat`，再访问 `http://127.0.0.1:9845`。不要只复制 EXE，Web 页面还需要同目录中的 `static` 文件夹。
+
 ## 从源码构建
 
 ```bash

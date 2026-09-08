@@ -3,6 +3,7 @@
 
 /ctyun-keeper
 /ctyun-keeper.exe
+/dist/
 /.gocache/
 /.gopath/
 /.tmp-*
