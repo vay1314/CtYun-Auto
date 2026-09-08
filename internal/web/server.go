@@ -127,6 +127,30 @@ func formatTime(v string) string {
 	}
 	return v
 }
+func platformStatusUpdatedToday(updatedAt string, now time.Time) bool {
+	updatedAt = strings.TrimSpace(updatedAt)
+	if updatedAt == "" {
+		return false
+	}
+	var updated time.Time
+	var err error
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		updated, err = time.Parse(layout, updatedAt)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		updated, err = time.ParseInLocation("2006-01-02 15:04:05", updatedAt, now.Location())
+	}
+	if err != nil {
+		return false
+	}
+	updated = updated.In(now.Location())
+	year, month, day := now.Date()
+	updatedYear, updatedMonth, updatedDay := updated.Date()
+	return year == updatedYear && month == updatedMonth && day == updatedDay
+}
 func reverseLogText(v string) string {
 	v = strings.ReplaceAll(v, "\r\n", "\n")
 	if v == "" {
@@ -562,22 +586,47 @@ func (s *Server) taskCards(w http.ResponseWriter, r *http.Request) {
 	}
 	accounts, _ := s.store.Accounts()
 	platforms, _ := s.store.Platforms()
+	now := time.Now()
 	var b strings.Builder
 	for _, a := range accounts {
 		p := platforms[a.ID]
+		fresh := platformStatusUpdatedToday(p.UpdatedAt, now)
 		points := "--"
 		if p.TotalPoints != nil {
 			points = strconv.Itoa(*p.TotalPoints)
 		}
-		fmt.Fprintf(&b, `<article class="panel launch-card platform-card"><div class=platform-card-head><div class=platform-account><span class=account-avatar>%s</span><span><strong>%s</strong><small>%s</small></span></div><div class=points-summary><small>当前总积分</small><strong>%s</strong></div></div><div class=platform-task-grid>`, esc(initial(a.Name)), esc(a.Name), map[bool]string{true: "账号启用", false: "账号停用"}[a.Enabled], points)
+		pointsLabel := "当前总积分"
+		updatedClass := ""
+		updatedText := "今日尚未查询"
+		if p.UpdatedAt != "" && fresh {
+			updatedText = "今日更新于 " + formatTime(p.UpdatedAt)
+		} else if p.UpdatedAt != "" {
+			pointsLabel = "最近总积分"
+			updatedClass = " stale"
+			updatedText = "上次查询于 " + formatTime(p.UpdatedAt) + " · 今日待更新"
+		}
+		accountState := map[bool]string{true: "success", false: "stopped"}[a.Enabled]
+		fmt.Fprintf(&b, `<article class="panel launch-card platform-card"><div class=platform-card-head><div class=platform-account><span class=account-avatar>%s</span><span><strong>%s</strong><small><i class="account-state-dot %s"></i>%s</small></span></div><div class=points-summary><small>%s</small><strong>%s</strong></div></div><div class=platform-task-grid>`, esc(initial(a.Name)), esc(a.Name), accountState, map[bool]string{true: "账号启用", false: "账号停用"}[a.Enabled], pointsLabel, points)
 		for _, x := range []struct{ k, n string }{{"login", "登录 AI 云电脑"}, {"usage", "使用 1 小时"}, {"chat", "AI 对话"}} {
 			t, ok := p.Tasks[x.k]
-			if !ok {
+			if !fresh {
+				t = storage.TaskStatus{State: "stale", StateLabel: "今日未查询", Total: map[string]int{"usage": 3600}[x.k]}
+				if t.Total == 0 {
+					t.Total = 1
+				}
+			} else if !ok {
 				t = storage.TaskStatus{State: "warning", StateLabel: "待查询"}
 			}
-			fmt.Fprintf(&b, `<div class=platform-task><span class=platform-task-name>%s</span><span class="pill %s">%s</span><small>进度 %d/%d</small></div>`, x.n, esc(t.State), esc(t.StateLabel), t.Current, t.Total)
+			progress := 0
+			if t.Total > 0 {
+				progress = min(100, max(0, t.Current*100/t.Total))
+			}
+			fmt.Fprintf(&b, `<div class="platform-task %s"><div class=platform-task-top><span class=platform-task-name>%s</span><span class="pill %s">%s</span></div><div class=platform-progress><span style="width:%d%%"></span></div><small>进度 %d/%d</small></div>`, esc(t.State), x.n, esc(t.State), esc(t.StateLabel), progress, t.Current, t.Total)
 		}
-		fmt.Fprintf(&b, `</div><div class=platform-updated><span class="material-symbols-rounded">schedule</span>更新于 %s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/login"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>登陆任务</span></button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s>%s<span>时长任务</span></button></form><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>AI对话任务</span></button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>任务状态查询</span></button></form></div></article>`, esc(formatTime(p.UpdatedAt)), a.ID, disabled(!a.Enabled), buttonIcon("login"), a.ID, disabled(!a.Enabled), buttonIcon("usage"), a.ID, disabled(!a.Enabled), buttonIcon("chat"), a.ID, disabled(!a.Enabled), buttonIcon("status"))
+		fmt.Fprintf(&b, `</div><div class="platform-updated%s"><span class="material-symbols-rounded">schedule</span>%s</div><div class=launch-actions><form method=post action="/accounts/%d/tasks/login"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>登陆任务</span></button></form><form method=post action="/accounts/%d/tasks/pc"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary%s>%s<span>时长任务</span></button></form><form method=post action="/accounts/%d/tasks/chat"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>AI对话任务</span></button></form><form method=post action="/accounts/%d/platform-status/refresh"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary%s>%s<span>任务状态查询</span></button></form></div></article>`, updatedClass, esc(updatedText), a.ID, disabled(!a.Enabled), buttonIcon("login"), a.ID, disabled(!a.Enabled), buttonIcon("usage"), a.ID, disabled(!a.Enabled), buttonIcon("chat"), a.ID, disabled(!a.Enabled), buttonIcon("status"))
+	}
+	if len(accounts) == 0 {
+		b.WriteString(`<article class="panel task-empty-card"><span class="material-symbols-rounded">manage_accounts</span><div><strong>还没有可运行的账号</strong><p>先到账号管理中添加账号，任务状态和快捷操作会显示在这里。</p></div><a class="secondary button" href=/accounts/new>添加账号</a></article>`)
 	}
 	fmt.Fprint(w, strings.ReplaceAll(b.String(), "{{CSRF}}", esc(s.csrf(w, r))))
 }
@@ -593,7 +642,7 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 	s.taskCards(&rw, r)
 	content += recorder.String() + `</section>`
 	runs, _ := s.store.Runs(100)
-	content += `<article class="panel table-panel"><div class=panel-head><div><p class=eyebrow>历史</p><h2>运行记录</h2></div></div><div class=table-wrap><table><thead><tr><th>编号</th><th>任务</th><th>账号</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead><tbody>`
+	content += `<article class="panel table-panel task-history-panel"><div class=panel-head><div class=panel-title><span class="panel-icon material-symbols-rounded">history</span><div><p class=eyebrow>历史记录</p><h2>任务运行记录</h2></div></div></div><div class=table-wrap><table><thead><tr><th>编号</th><th>任务</th><th>账号</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead><tbody>`
 	for _, v := range runs {
 		label := taskLabel(v.TaskType)
 		if label == "" {
@@ -744,7 +793,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 	if selected.ID != 0 {
 		clearID = strconv.FormatInt(selected.ID, 10)
 	}
-	clearAction := `<div class=log-panel-actions><form method=post action=/logs/clear data-confirm="确认清空当前日志？清空后无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=run_id value="` + clearID + `"><button class="icon-button log-clear-button" type=submit title="清空当前日志" aria-label="清空当前日志"><span class="material-symbols-rounded">delete_sweep</span></button></form>` + indicator + `</div>`
+	clearAction := `<div class=log-panel-actions><form method=post action=/logs/clear data-confirm="确认清空当前日志？清空后无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=run_id value="` + clearID + `"><button class="icon-button log-clear-button" type=submit title="清空当前日志" aria-label="清空当前日志"><img src=/static/delete-sweep.svg alt=""></button></form>` + indicator + `</div>`
 	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + s.logSources(runs, selected.ID) + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + clearAction + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
 	s.page(w, r, "日志", content, true)
 }
@@ -899,7 +948,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>设置</h1></div></header><section class=settings-grid><form method=post action=/settings/password class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><h2>修改管理密码</h2><label>当前密码<input name=current_password type=password required></label><label>新密码<input name=password type=password minlength=8 required></label><label>确认新密码<input name=confirmation type=password minlength=8 required></label><button class=primary>更新密码</button></form><article class="panel info-panel"><h2>当前部署</h2><dl><div><dt>端口</dt><dd>9845</dd></div><div><dt>版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go / Alpine / 单进程</dd></div></dl></article><article class="panel form-panel log-settings-panel"><div class=panel-title><span class="panel-icon material-symbols-rounded">history</span><div><p class=eyebrow>存储管理</p><h2>日志设置</h2></div></div><form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<input name=retention_days type=number min=1 max=3650 value="%d" required></label><p class=muted>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p><button class=primary>保存日志设置</button></form><div class=danger-zone><div><strong>清空全部日志</strong><p>清空运行日志与全部任务日志，并保留任务历史记录；正在执行的任务可以继续写入新日志。</p></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><span class="material-symbols-rounded">delete_forever</span>清空全部日志</button></form></div></article></section>`, esc(s.version), s.manager.LogRetentionDays())
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>系统设置</h1><p class=page-subtitle>管理访问安全、部署信息与日志存储策略。</p></div></header><section class=settings-grid><form method=post action=/settings/password class="panel form-panel settings-card password-settings-card"><input type=hidden name=csrf_token value="{{CSRF}}"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">account_circle</span><div><p class=eyebrow>访问安全</p><h2>修改管理密码</h2><small>定期更新密码可以提升管理面板的安全性。</small></div></div><div class=settings-fields><label>当前密码<div class=password-field><input name=current_password type=password required>%s</div></label><label>新密码<div class=password-field><input name=password type=password minlength=8 required>%s</div></label><label>确认新密码<div class=password-field><input name=confirmation type=password minlength=8 required>%s</div></label></div><div class=settings-card-footer><span>新密码至少需要 8 位字符</span><button class=primary>更新密码</button></div></form><article class="panel info-panel settings-card deployment-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">deployed_code</span><div><p class=eyebrow>部署信息</p><h2>当前运行环境</h2><small>当前 CtYunKeeper 服务的部署参数。</small></div></div><dl class=deployment-facts><div><dt>服务端口</dt><dd>9845</dd></div><div><dt>当前版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go · Alpine · 单进程</dd></div></dl></article><article class="panel form-panel settings-card log-settings-panel"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">history</span><div><p class=eyebrow>存储管理</p><h2>日志设置</h2><small>控制日志保留周期，并按需释放存储空间。</small></div></div><div class=log-settings-content><form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<div class=number-field><input name=retention_days type=number min=1 max=3650 value="%d" required><span>天</span></div></label><p class=muted>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p><button class=primary>保存日志设置</button></form><div class=danger-zone><div class=danger-zone-copy><span class=danger-zone-icon><img src=/static/delete-forever.svg alt=""></span><div><strong>清空全部日志</strong><p>清空运行日志与全部任务日志，并保留任务历史记录；正在执行的任务可以继续写入新日志。</p></div></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><img src=/static/delete-forever.svg alt=""><span>清空全部日志</span></button></form></div></div></article></section>`, passwordToggle(), passwordToggle(), passwordToggle(), esc(s.version), s.manager.LogRetentionDays())
 	s.page(w, r, "设置", content, true)
 }
 func (s *Server) logSettings(w http.ResponseWriter, r *http.Request) {
