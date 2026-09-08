@@ -669,6 +669,17 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 				}
 				if e == nil {
 					e = eai.New(c).Chat(ctx, "你好")
+					if ctyun.IsLoginExpired(e) {
+						logger.Printf("AI 平台登录信息已过期，正在重新登录")
+						m.store.ClearAuthCache(accountID)
+						if fresh, loginErr := c.Login(ctx); loginErr != nil {
+							e = fmt.Errorf("AI 平台登录失效，重新登录失败：%w", loginErr)
+						} else {
+							m.saveProfile(accountID, fresh)
+							logger.Printf("云电脑账号已重新登录，正在重试 AI 对话")
+							e = eai.New(c).Chat(ctx, "你好")
+						}
+					}
 				}
 			case "pc":
 				e = m.waitUsage(ctx, c, logger)

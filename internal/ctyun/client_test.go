@@ -2,11 +2,36 @@ package ctyun
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestIsLoginExpired(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "expired code", err: APIError{Code: 40010, Message: "当前登录信息已过期，请重新登录"}, want: true},
+		{name: "wrapped expired code", err: fmt.Errorf("获取票据：%w", APIError{Code: "40010", Message: "expired"}), want: true},
+		{name: "pointer expired code", err: &APIError{Code: 40010, Message: "expired"}, want: true},
+		{name: "expired message", err: errors.New("EAI：当前登录信息已过期，请重新登录"), want: true},
+		{name: "other platform error", err: APIError{Code: 40011, Message: "参数错误"}, want: false},
+		{name: "network error", err: errors.New("network timeout"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsLoginExpired(tt.err); got != tt.want {
+				t.Fatalf("IsLoginExpired(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

@@ -121,6 +121,21 @@ func (e APIError) Error() string {
 	return fmt.Sprintf("平台接口失败（%v）：%s", e.Code, e.Message)
 }
 
+func IsLoginExpired(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr APIError
+	if errors.As(err, &apiErr) {
+		return fmt.Sprint(apiErr.Code) == "40010" || strings.Contains(apiErr.Message, "登录信息已过期")
+	}
+	var apiErrPtr *APIError
+	if errors.As(err, &apiErrPtr) {
+		return fmt.Sprint(apiErrPtr.Code) == "40010" || strings.Contains(apiErrPtr.Message, "登录信息已过期")
+	}
+	return strings.Contains(err.Error(), "当前登录信息已过期")
+}
+
 type Client struct {
 	Username, Password, DeviceCode, OCR string
 	HTTP                                *http.Client
