@@ -18,6 +18,11 @@
 
 ![任务中心](docs/screenshots/03-tasks.png)
 
+### 系统设置
+
+![系统设置](docs/screenshots/04-settings.png)
+
+
 ## 快速启动
 
 ```bash
