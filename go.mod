@@ -1,4 +1,4 @@
-module github.com/yin26287903/ctyun-auto
+module github.com/vay1314/CtYun-Keeper
 
 go 1.24.0
 

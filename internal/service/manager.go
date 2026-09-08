@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"github.com/yin26287903/ctyun-auto/internal/ctyun"
-	"github.com/yin26287903/ctyun-auto/internal/eai"
-	"github.com/yin26287903/ctyun-auto/internal/security"
-	"github.com/yin26287903/ctyun-auto/internal/storage"
+	"github.com/vay1314/CtYun-Keeper/internal/ctyun"
+	"github.com/vay1314/CtYun-Keeper/internal/eai"
+	"github.com/vay1314/CtYun-Keeper/internal/security"
+	"github.com/vay1314/CtYun-Keeper/internal/storage"
 )
 
 type clientState struct {

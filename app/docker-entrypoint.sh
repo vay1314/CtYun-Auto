@@ -9,7 +9,7 @@ if [ "$(id -u)" = "0" ]; then
         echo "无法修复 $DATA_DIR 权限；请检查宿主机挂载、只读属性或 NAS ACL。" >&2
         exit 1
     fi
-    exec su-exec 10001:10001 /app/ctyun-auto "$@"
+    exec su-exec 10001:10001 /app/ctyun-keeper "$@"
 fi
 
-exec /app/ctyun-auto "$@"
+exec /app/ctyun-keeper "$@"

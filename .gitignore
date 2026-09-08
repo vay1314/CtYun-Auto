@@ -1,18 +1,8 @@
-# 忽略挂载的数据目录（包含你的 Cookie 和截图）
+/data/
+/ctyun-keeper-data/
 
-
-# 忽略 Python 缓存文件
-__pycache__/
-*.pyc
-
-# 忽略可能包含环境变量的文件
-.env
-
-# 忽略其他
-.devicecode_*
-ctyun_*.json
-
-# 抓包与浏览器存储可能包含账号、Cookie 和 Token
-*.har
-storage-data.json
-ai-storage-*.json
+/ctyun-keeper
+/ctyun-keeper.exe
+/.gocache/
+/.gopath/
+/.tmp-*

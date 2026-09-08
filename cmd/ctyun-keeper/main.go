@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yin26287903/ctyun-auto/internal/security"
-	"github.com/yin26287903/ctyun-auto/internal/service"
-	"github.com/yin26287903/ctyun-auto/internal/storage"
-	webapp "github.com/yin26287903/ctyun-auto/internal/web"
+	"github.com/vay1314/CtYun-Keeper/internal/security"
+	"github.com/vay1314/CtYun-Keeper/internal/service"
+	"github.com/vay1314/CtYun-Keeper/internal/storage"
+	webapp "github.com/vay1314/CtYun-Keeper/internal/web"
 )
 
 var version = "dev"
@@ -29,7 +29,7 @@ func main() {
 	if e := os.MkdirAll(dataDir, 0750); e != nil {
 		log.Fatal(e)
 	}
-	store, e := storage.Open(filepath.Join(dataDir, "ctyun-auto.db"))
+	store, e := storage.Open(filepath.Join(dataDir, "ctyun-keeper.db"))
 	if e != nil {
 		log.Fatal(e)
 	}
@@ -51,7 +51,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() { <-stop; manager.Close(); _ = server.Close() }()
-	log.Printf("ctyun-auto v%s listening on %s", version, server.Addr)
+	log.Printf("CtYunKeeper v%s listening on %s", version, server.Addr)
 	if e = server.ListenAndServe(); e != nil && e != http.ErrServerClosed {
 		log.Fatal(e)
 	}

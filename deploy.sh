@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-IMAGE="ctyun-auto:local"
-CONTAINER="ctyun-auto"
+IMAGE="ctyun-keeper:local"
+CONTAINER="ctyun-keeper"
 PORT="${APP_PORT:-9845}"
-DATA_DIR="${CTYUN_DATA_DIR:-$(pwd)/ctyun-data}"
+DATA_DIR="${CTYUN_DATA_DIR:-$(pwd)/ctyun-keeper-data}"
 VERSION="$(tr -d '[:space:]' < VERSION)"
 
 case "$VERSION" in
@@ -14,7 +14,7 @@ esac
 command -v docker >/dev/null 2>&1 || { echo "未安装 Docker" >&2; exit 1; }
 mkdir -p "$DATA_DIR"
 
-echo "构建 ctyun-auto v$VERSION（Go + Alpine）..."
+echo "构建 CtYunKeeper v$VERSION（Go + Alpine）..."
 docker build -f app/Dockerfile --build-arg APP_VERSION="$VERSION" -t "$IMAGE" .
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
   docker rm -f "$CONTAINER" >/dev/null

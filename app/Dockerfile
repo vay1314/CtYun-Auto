@@ -10,21 +10,21 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" -o /out/ctyun-auto ./cmd/ctyun-auto
+    go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" -o /out/ctyun-keeper ./cmd/ctyun-keeper
 
 FROM alpine:3.22
 ARG APP_VERSION=dev
-LABEL org.opencontainers.image.title="ctyun-auto" \
-      org.opencontainers.image.description="CtYun keep-alive, points tasks and management panel" \
+LABEL org.opencontainers.image.title="CtYunKeeper" \
+      org.opencontainers.image.description="CtYunKeeper cloud desktop keep-alive, points tasks and management panel" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.source="https://github.com/yin26287903/ctyun-auto"
+      org.opencontainers.image.source="https://github.com/vay1314/CtYun-Keeper"
 RUN apk add --no-cache ca-certificates tzdata su-exec \
     && addgroup -S -g 10001 ctyun \
     && adduser -S -D -H -u 10001 -G ctyun ctyun \
     && mkdir -p /app/data /app/static \
     && chown -R ctyun:ctyun /app
 WORKDIR /app
-COPY --from=builder /out/ctyun-auto /app/ctyun-auto
+COPY --from=builder /out/ctyun-keeper /app/ctyun-keeper
 COPY --chown=ctyun:ctyun app/web/static /app/static
 COPY app/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh

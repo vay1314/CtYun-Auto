@@ -81,8 +81,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
 
   context.registerTool({
-    name: "get_ctyun_auto_status",
-    title: "读取 ctyun-auto 状态",
+    name: "get_ctyun_keeper_status",
+    title: "读取 CtYunKeeper 状态",
     description: "读取 CtYun 保活、账号数量和当前任务状态。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, untrustedContentHint: false },

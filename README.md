@@ -7,12 +7,12 @@
 ## 快速启动
 
 ```bash
-mkdir -p ./ctyunkeeper-data
+mkdir -p ./ctyun-keeper-data
 
 docker run -d \
-  --name ctyunkeeper \
+  --name ctyun-keeper \
   -p 9845:9845 \
-  -v "$(pwd)/ctyunkeeper-data:/app/data" \
+  -v "$(pwd)/ctyun-keeper-data:/app/data" \
   --restart unless-stopped \
   yin26287903/ctyun-keeper:latest
 ```
@@ -25,7 +25,7 @@ docker run -d \
 
 ```bash
 git clone https://github.com/vay1314/CtYun-Keeper.git
-cd ctyun-keeper
+cd CtYun-Keeper
 sh deploy.sh
 ```
 
@@ -67,7 +67,7 @@ go build ./cmd/ctyun-keeper
 
 ```text
 /app/data/
-├─ ctyun-auto.db
+├─ ctyun-keeper.db
 ├─ .credential_key
 ├─ .web_session_key
 └─ logs/

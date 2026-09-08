@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yin26287903/ctyun-auto/internal/ctyun"
-	"github.com/yin26287903/ctyun-auto/internal/security"
-	"github.com/yin26287903/ctyun-auto/internal/service"
-	"github.com/yin26287903/ctyun-auto/internal/storage"
+	"github.com/vay1314/CtYun-Keeper/internal/ctyun"
+	"github.com/vay1314/CtYun-Keeper/internal/security"
+	"github.com/vay1314/CtYun-Keeper/internal/service"
+	"github.com/vay1314/CtYun-Keeper/internal/storage"
 )
 
 type Server struct {
@@ -221,9 +221,9 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, title, content str
 	mainClass := "auth-shell"
 	if auth {
 		mainClass = "main-shell"
-		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYun Auto</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>ctyun-auto</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form></div></header><button class="sidebar-backdrop" type="button"></button>`
+		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>CtYunKeeper</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form></div></header><button class="sidebar-backdrop" type="button"></button>`
 	}
-	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=csrf-token content='%s'><title>%s · ctyun-auto</title><link rel=stylesheet href='/static/app.css?v=%s'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
+	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=csrf-token content='%s'><title>%s · CtYunKeeper</title><link rel=stylesheet href='/static/app.css?v=%s'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
 }
 func redirect(w http.ResponseWriter, r *http.Request, path, msg string, isErr bool) {
 	key := "notice"
@@ -724,7 +724,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		raw = []byte(reverseLogText(string(raw)))
 	}
 	logTitle := "运行日志"
-	logMeta := "CtYun Auto 服务与保活状态"
+	logMeta := "CtYunKeeper 服务与保活状态"
 	indicator := `<span class="live-indicator"><i></i>实时输出</span>`
 	attrs := ` id="log-output" data-stream="/logs/system/stream" data-offset="` + strconv.FormatInt(fileSize, 10) + `"`
 	if selected.ID != 0 {
@@ -750,7 +750,7 @@ func (s *Server) logSources(runs []storage.Run, selectedID int64) string {
 	if selectedID != 0 {
 		systemActive = ""
 	}
-	fmt.Fprintf(&sources, `<aside id=log-sources class="panel log-sources" hx-get="%s" hx-trigger="every 5s" hx-swap=outerHTML><h2>系统日志</h2><a class="%s" href="/logs"><strong>运行日志</strong><small>CtYun Auto 服务输出</small></a><h2>任务日志</h2>`, partialURL, systemActive)
+	fmt.Fprintf(&sources, `<aside id=log-sources class="panel log-sources" hx-get="%s" hx-trigger="every 5s" hx-swap=outerHTML><h2>系统日志</h2><a class="%s" href="/logs"><strong>运行日志</strong><small>CtYunKeeper 服务输出</small></a><h2>任务日志</h2>`, partialURL, systemActive)
 	if len(runs) == 0 {
 		sources.WriteString(`<p class=log-empty>还没有任务记录</p>`)
 	}
