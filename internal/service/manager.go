@@ -43,6 +43,7 @@ type Manager struct {
 	logMu         sync.Mutex
 	mu            sync.RWMutex
 	clients       map[int64]*clientState
+	nativeClients map[int64]*ctyun.NativeClient
 	active        map[int64]running
 	verify        map[int64]VerifySession
 	ctx           context.Context
@@ -54,7 +55,7 @@ func New(store *storage.Store, key []byte, dataDir, ocr string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0750)
 	f, _ := os.OpenFile(filepath.Join(dataDir, "logs", "ctyun.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
-	return &Manager{store: store, credentialKey: key, dataDir: dataDir, ocr: ocr, logger: log.New(f, "", log.LstdFlags), clients: map[int64]*clientState{}, active: map[int64]running{}, verify: map[int64]VerifySession{}, ctx: ctx, cancel: cancel, started: time.Now()}
+	return &Manager{store: store, credentialKey: key, dataDir: dataDir, ocr: ocr, logger: log.New(f, "", log.LstdFlags), clients: map[int64]*clientState{}, nativeClients: map[int64]*ctyun.NativeClient{}, active: map[int64]running{}, verify: map[int64]VerifySession{}, ctx: ctx, cancel: cancel, started: time.Now()}
 }
 func (m *Manager) Start() {
 	m.RestartKeepalive()
@@ -231,6 +232,100 @@ func (m *Manager) saveProfile(id int64, p ctyun.Profile) {
 	if encrypted, e := security.EncryptFernet(string(raw), m.credentialKey); e == nil {
 		_ = m.store.SaveAuthCache(id, encrypted)
 	}
+}
+
+func (m *Manager) newNativeClient(a storage.Account) (*ctyun.NativeClient, error) {
+	pwd, err := security.DecryptFernet(a.PasswordEncrypted, m.credentialKey)
+	if err != nil {
+		return nil, err
+	}
+	ocrClient := ctyun.NewClient(a.Username, pwd, a.DeviceCode, m.ocr)
+	client := ctyun.NewNativeClient(a.Username, pwd, a.DeviceCode, ocrClient.SolveCaptcha)
+	if encrypted, _ := m.store.NativeAuthCache(a.ID); encrypted != "" {
+		if raw, decryptErr := security.DecryptFernet(encrypted, m.credentialKey); decryptErr == nil {
+			var profile ctyun.NativeProfile
+			if json.Unmarshal([]byte(raw), &profile) == nil && profile.UserID > 0 && profile.UserEID != "" && profile.TenantID > 0 && profile.SecretKey != "" && profile.CommonLoginReqHeader != "" {
+				client.UseProfile(profile)
+			}
+		}
+	}
+	return client, nil
+}
+
+func (m *Manager) saveNativeProfile(id int64, profile ctyun.NativeProfile) error {
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	encrypted, err := security.EncryptFernet(string(raw), m.credentialKey)
+	if err != nil {
+		return err
+	}
+	return m.store.SaveNativeAuthCache(id, encrypted)
+}
+
+func (m *Manager) nativeClient(ctx context.Context, a storage.Account) (*ctyun.NativeClient, error) {
+	m.mu.RLock()
+	client := m.nativeClients[a.ID]
+	m.mu.RUnlock()
+	if client != nil {
+		if _, ok := client.Profile(); ok {
+			return client, nil
+		}
+	}
+	var err error
+	if client == nil {
+		client, err = m.newNativeClient(a)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, ok := client.Profile(); !ok {
+		profile, loginErr := client.Login(ctx)
+		if loginErr != nil {
+			return nil, loginErr
+		}
+		if err := m.saveNativeProfile(a.ID, profile); err != nil {
+			client.ClearProfile()
+			return nil, fmt.Errorf("保存原生登录态失败：%w", err)
+		}
+	}
+	m.mu.Lock()
+	m.nativeClients[a.ID] = client
+	m.mu.Unlock()
+	return client, nil
+}
+
+func (m *Manager) ClearNativeAuth(id int64) {
+	m.store.ClearNativeAuthCache(id)
+	m.mu.Lock()
+	delete(m.nativeClients, id)
+	m.mu.Unlock()
+}
+
+func (m *Manager) runChat(ctx context.Context, a storage.Account, logger *log.Logger) error {
+	logger.Printf("正在使用原生登录态获取 AI 授权")
+	client, err := m.nativeClient(ctx, a)
+	if err != nil {
+		return err
+	}
+	err = eai.New(client).Chat(ctx, "你好")
+	if !ctyun.IsLoginExpired(err) {
+		return err
+	}
+	logger.Printf("AI 原生登录态已失效，正在重新登录")
+	client.ClearProfile()
+	m.store.ClearNativeAuthCache(a.ID)
+	profile, loginErr := client.Login(ctx)
+	if loginErr != nil {
+		return fmt.Errorf("AI 原生登录态失效，重新登录失败：%w", loginErr)
+	}
+	if saveErr := m.saveNativeProfile(a.ID, profile); saveErr != nil {
+		client.ClearProfile()
+		return fmt.Errorf("保存刷新后的原生登录态失败：%w", saveErr)
+	}
+	logger.Printf("原生登录态已刷新，正在重试 AI 对话")
+	return eai.New(client).Chat(ctx, "你好")
 }
 func (m *Manager) client(ctx context.Context, a storage.Account) (*ctyun.Client, error) {
 	m.mu.RLock()
@@ -650,37 +745,15 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 	defer f.Close()
 	logger.Printf("开始%s任务", map[string]string{"login": "登录 AI 云电脑", "chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ])
 	a, e := m.store.Account(accountID)
-	if e == nil {
+	if e == nil && typ == "chat" {
+		e = m.runChat(ctx, a, logger)
+	} else if e == nil {
 		var c *ctyun.Client
 		c, e = m.client(ctx, a)
 		if e == nil {
 			switch typ {
 			case "login":
 				e = m.activateDesktopLogin(ctx, a, c, logger)
-			case "chat":
-				if c.Profile != nil && c.Profile.CommonLoginReqHeader == "" {
-					c.Profile = nil
-					m.store.ClearAuthCache(accountID)
-					if fresh, loginErr := c.Login(ctx); loginErr != nil {
-						e = loginErr
-					} else {
-						m.saveProfile(accountID, fresh)
-					}
-				}
-				if e == nil {
-					e = eai.New(c).Chat(ctx, "你好")
-					if ctyun.IsLoginExpired(e) {
-						logger.Printf("AI 平台登录信息已过期，正在重新登录")
-						m.store.ClearAuthCache(accountID)
-						if fresh, loginErr := c.Login(ctx); loginErr != nil {
-							e = fmt.Errorf("AI 平台登录失效，重新登录失败：%w", loginErr)
-						} else {
-							m.saveProfile(accountID, fresh)
-							logger.Printf("云电脑账号已重新登录，正在重试 AI 对话")
-							e = eai.New(c).Chat(ctx, "你好")
-						}
-					}
-				}
 			case "pc":
 				e = m.waitUsage(ctx, c, logger)
 			case "redeem":

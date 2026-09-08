@@ -457,6 +457,7 @@ func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.ClearAuthCache(saved)
+	s.manager.ClearNativeAuth(saved)
 	if !a.Enabled {
 		s.manager.RestartKeepalive()
 		redirect(w, r, "/accounts", "账号已保存（当前停用）", false)
@@ -499,6 +500,7 @@ func (s *Server) accountRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = s.store.DeleteAccount(id)
+		s.manager.ClearNativeAuth(id)
 		s.manager.RestartKeepalive()
 		redirect(w, r, "/accounts", "账号已删除", false)
 		return

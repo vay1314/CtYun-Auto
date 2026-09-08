@@ -12,11 +12,43 @@ func TestOpenAndMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	for _, table := range []string{"accounts", "task_runs", "account_platform_status", "redeem_configs", "redeem_states"} {
+	for _, table := range []string{"accounts", "task_runs", "account_platform_status", "account_auth_cache", "account_native_auth_cache", "redeem_configs", "redeem_states"} {
 		var name string
 		if err := s.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Fatalf("missing %s: %v", table, err)
 		}
+	}
+}
+
+func TestNativeAuthCacheRoundTrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := Account{Name: "test", Username: "user", DeviceCode: "device"}
+	id, err := s.SaveAccount(a, "password", []byte("unused"), func(value string, _ []byte) (string, error) { return value, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveNativeAuthCache(id, "encrypted-native-profile"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAuthCache(id, "encrypted-web-profile"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.NativeAuthCache(id)
+	if err != nil || got != "encrypted-native-profile" {
+		t.Fatalf("NativeAuthCache() = %q, %v", got, err)
+	}
+	s.ClearNativeAuthCache(id)
+	got, err = s.NativeAuthCache(id)
+	if err != nil || got != "" {
+		t.Fatalf("NativeAuthCache() after clear = %q, %v", got, err)
+	}
+	web, err := s.AuthCache(id)
+	if err != nil || web != "encrypted-web-profile" {
+		t.Fatalf("clearing native cache changed Web cache: %q, %v", web, err)
 	}
 }
 

@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS task_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,accoun
 CREATE TABLE IF NOT EXISTS scheduler_claims(account_id INTEGER NOT NULL,task_type TEXT NOT NULL,minute_key TEXT NOT NULL,PRIMARY KEY(account_id,task_type,minute_key));
 CREATE TABLE IF NOT EXISTS account_platform_status(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,total_points INTEGER,tasks_json TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS account_auth_cache(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,login_info_encrypted TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS account_native_auth_cache(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,login_info_encrypted TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS redeem_configs(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,enabled INTEGER NOT NULL DEFAULT 0,product_id TEXT NOT NULL DEFAULT '',product_name TEXT NOT NULL DEFAULT '',product_type TEXT NOT NULL DEFAULT '',desktop_id TEXT NOT NULL DEFAULT '',cost_points INTEGER NOT NULL DEFAULT 0,max_times INTEGER NOT NULL DEFAULT 1,schedule_type TEXT NOT NULL DEFAULT 'daily',interval_days INTEGER NOT NULL DEFAULT 1,monthly_days TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS redeem_states(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,last_attempt_date TEXT NOT NULL DEFAULT '',last_attempt_status TEXT NOT NULL DEFAULT '',last_success_date TEXT NOT NULL DEFAULT '',last_redeem_times INTEGER NOT NULL DEFAULT 0,last_points_spent INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_task_runs_started_at ON task_runs(started_at DESC);`)
@@ -172,6 +173,21 @@ func (s *Store) SaveAuthCache(id int64, value string) error {
 }
 func (s *Store) ClearAuthCache(id int64) {
 	_, _ = s.DB.Exec("DELETE FROM account_auth_cache WHERE account_id=?", id)
+}
+func (s *Store) NativeAuthCache(id int64) (string, error) {
+	var v string
+	e := s.DB.QueryRow("SELECT login_info_encrypted FROM account_native_auth_cache WHERE account_id=?", id).Scan(&v)
+	if errors.Is(e, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, e
+}
+func (s *Store) SaveNativeAuthCache(id int64, value string) error {
+	_, e := s.DB.Exec(`INSERT INTO account_native_auth_cache(account_id,login_info_encrypted,updated_at) VALUES(?,?,?) ON CONFLICT(account_id) DO UPDATE SET login_info_encrypted=excluded.login_info_encrypted,updated_at=excluded.updated_at`, id, value, Now())
+	return e
+}
+func (s *Store) ClearNativeAuthCache(id int64) {
+	_, _ = s.DB.Exec("DELETE FROM account_native_auth_cache WHERE account_id=?", id)
 }
 func (s *Store) AddRun(accountID int64, typ, trigger, logPath string) (int64, error) {
 	r, e := s.DB.Exec("INSERT INTO task_runs(account_id,task_type,trigger_source,status,started_at,log_path) VALUES(?,?,?,'queued',?,?)", accountID, typ, trigger, Now(), logPath)

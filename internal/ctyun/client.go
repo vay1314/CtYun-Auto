@@ -532,31 +532,6 @@ func (c *Client) PlaceOrder(ctx context.Context, productID int64, productType st
 	var out any
 	return c.points(ctx, "POST", "/selforder/paas/placeOrder", nil, body, &out)
 }
-func (c *Client) GetTicket(ctx context.Context, service string) (string, error) {
-	if c.Profile == nil {
-		return "", errors.New("尚未登录")
-	}
-	ts, rid := strconv.FormatInt(time.Now().UnixMilli(), 10), c.next()
-	source := "25" + rid + strconv.FormatInt(c.Profile.TenantID, 10) + ts + strconv.FormatInt(c.Profile.UserID, 10) + "204010005" + c.Profile.SecretKey
-	digest := sha256.Sum256([]byte(source))
-	h := c.base()
-	h.Set("ctg-devicetype", "25")
-	h.Set("ctg-version", "204010005")
-	h.Set("ctg-appmodel", "2")
-	h.Set("ctg-appchannel", "1020400")
-	h.Set("ctg-device-model", "windows")
-	h.Set("ctg-requestid", rid)
-	h.Set("ctg-timestamp", ts)
-	h.Set("ctg-userid", strconv.FormatInt(c.Profile.UserID, 10))
-	h.Set("ctg-tenantid", strconv.FormatInt(c.Profile.TenantID, 10))
-	h.Set("ctg-signaturestr", strings.ToUpper(hex.EncodeToString(digest[:])))
-	h.Set("ctg-common-data", c.Profile.CommonLoginReqHeader)
-	var out struct {
-		Ticket string `json:"ticket"`
-	}
-	e := c.do(ctx, "GET", PCOrigin+"/api/auth/client/getTicket?"+url.Values{"service": {service}}.Encode(), nil, h, &out)
-	return out.Ticket, e
-}
 func (c *Client) SendSMS(ctx context.Context) error {
 	h, _ := c.signed(PCVersion, false)
 	req, _ := http.NewRequestWithContext(ctx, "GET", PCOrigin+"/api/auth/client/validateCode/captcha?width=120&height=40&_t="+strconv.FormatInt(time.Now().UnixMilli(), 10), nil)
