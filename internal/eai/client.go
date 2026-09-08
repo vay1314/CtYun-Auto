@@ -35,8 +35,23 @@ type Client struct {
 	tickets                TicketProvider
 	http                   *http.Client
 	host, sessionKey, xuid string
-	tenant                 int64
+	tenant                 *Tenant
 }
+type Tenant struct {
+	TenantID    int64  `json:"tenantId"`
+	TenantIDStr string `json:"tenantIdStr"`
+}
+
+func (t Tenant) HeaderID() string {
+	if t.TenantIDStr != "" {
+		return t.TenantIDStr
+	}
+	if t.TenantID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(t.TenantID, 10)
+}
+
 type envelope struct {
 	ResultCode any             `json:"resultCode"`
 	ResultMsg  string          `json:"resultMsg"`
@@ -245,7 +260,11 @@ func (c *Client) request(ctx context.Context, method, path string, q url.Values,
 		endpoint += "?" + q.Encode()
 	}
 	req, _ := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
-	req.Header = c.headers(strconv.FormatInt(c.tenant, 10), q, body)
+	tenantID := ""
+	if c.tenant != nil {
+		tenantID = c.tenant.HeaderID()
+	}
+	req.Header = c.headers(tenantID, q, body)
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -255,6 +274,22 @@ func (c *Client) request(ctx context.Context, method, path string, q url.Values,
 	}
 	return readEnv(r)
 }
+
+func parseTenants(raw json.RawMessage) ([]Tenant, error) {
+	var values []Tenant
+	if err := json.Unmarshal(raw, &values); err == nil {
+		return values, nil
+	} else {
+		var nested struct {
+			Data []Tenant `json:"data"`
+		}
+		if nestedErr := json.Unmarshal(raw, &nested); nestedErr != nil {
+			return nil, fmt.Errorf("解析 EAI 租户列表：%w", err)
+		}
+		return nested.Data, nil
+	}
+}
+
 func (c *Client) Chat(ctx context.Context, text string) error {
 	if e := c.Authorize(ctx); e != nil {
 		return e
@@ -263,13 +298,14 @@ func (c *Client) Chat(ctx context.Context, text string) error {
 	if e != nil {
 		return e
 	}
-	var tenants []struct {
-		TenantID int64 `json:"tenantId"`
+	tenants, e := parseTenants(env.Data)
+	if e != nil {
+		return e
 	}
-	if e = json.Unmarshal(env.Data, &tenants); e != nil || len(tenants) == 0 {
+	if len(tenants) == 0 || tenants[0].TenantID == 0 {
 		return errors.New("EAI 没有可用租户")
 	}
-	c.tenant = tenants[0].TenantID
+	c.tenant = &tenants[0]
 	env, e = c.request(ctx, "GET", "/ai/portal/v2/openai/chat/queryModels", url.Values{"type": {"all"}}, nil)
 	if e != nil {
 		return e
@@ -291,10 +327,10 @@ func (c *Client) Chat(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "" {
 		text = "你好"
 	}
-	body, _ := json.Marshal(map[string]any{"key_model": model, "messages": []map[string]string{{"role": "user", "content": text}}, "stream": true, "client_retry": false, "web_search": false, "tenantId": c.tenant, "enable_thinking": false})
+	body, _ := json.Marshal(map[string]any{"key_model": model, "messages": []map[string]string{{"role": "user", "content": text}}, "stream": true, "client_retry": false, "web_search": false, "tenantId": c.tenant.TenantID, "enable_thinking": false})
 	p := strings.Replace("/ai/portal/v3/openai/chat/completions", "/ai/portal/v", "/ai/portal/wenc/v", 1)
 	req, _ := http.NewRequestWithContext(ctx, "POST", c.host+p, bytes.NewReader(body))
-	req.Header = c.headers(strconv.FormatInt(c.tenant, 10), nil, body)
+	req.Header = c.headers(c.tenant.HeaderID(), nil, body)
 	req.Header.Set("Content-Type", "application/json")
 	r, e := c.http.Do(req)
 	if e != nil {
