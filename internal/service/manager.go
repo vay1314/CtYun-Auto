@@ -85,7 +85,7 @@ func (m *Manager) LogRetentionDays() int {
 	value, _ := m.store.Setting("log_retention_days")
 	days, e := strconv.Atoi(value)
 	if e != nil || days < 1 || days > 3650 {
-		return 30
+		return 15
 	}
 	return days
 }

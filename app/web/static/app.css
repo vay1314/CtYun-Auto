@@ -290,21 +290,21 @@ pre { height: 58vh; margin: 0; padding: 18px; overflow: auto; border: 1px solid 
 .settings-fields { display: grid; grid-template-columns: 1fr; gap: 16px; }
 .settings-fields label { font-size: .79rem; }
 .settings-hint { margin: 10px 0 16px; color: var(--muted); font-size: .76rem; }
-.settings-primary-action { width: 100%; margin-top: auto; }
+.settings-primary-action { width: fit-content; min-width: 148px; align-self: flex-start; margin-top: auto; }
 .deployment-facts { display: grid; gap: 12px; margin: 10px 0 0; }
 .deployment-facts div { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 58px; padding: 14px 17px; border: 1px solid rgba(223, 230, 239, .55); border-radius: 11px; background: #f7f9fb; }
 .deployment-facts dt { color: var(--muted); font-size: .82rem; }
 .deployment-facts dd { margin: 0; color: #253248; font-weight: 750; text-align: right; }
 .log-settings-head { padding-bottom: 22px; border-bottom: 1px solid var(--line); }
 .log-settings-head form { margin-left: auto; }
-.retention-form { display: grid; grid-template-columns: minmax(240px, 380px) auto; align-items: end; gap: 12px 16px; padding-top: 22px; }
+.retention-form { display: grid; grid-template-columns: minmax(240px, 380px) 148px; align-items: end; justify-content: start; gap: 12px 16px; padding-top: 22px; }
 .retention-form label { min-width: 0; }
-.retention-form button { min-height: 42px; }
+.retention-form button { width: 148px; min-height: 42px; }
 .retention-note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .78rem; }
 .number-field { position: relative; }
 .number-field input { padding-right: 42px; }
 .number-field span { position: absolute; top: 50%; right: 13px; color: var(--muted); font-size: .8rem; transform: translateY(-50%); }
-.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; color: #b94f48; border: 1px solid rgba(220, 102, 93, .3); background: rgba(220, 102, 93, .08); }
+.danger-button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 16px; border-radius: 9px; color: #b94f48; border: 1px solid rgba(220, 102, 93, .3); background: rgba(220, 102, 93, .08); font-weight: 700; }
 .danger-button:hover { color: #a33e37; border-color: rgba(220, 102, 93, .5); background: rgba(220, 102, 93, .13); }
 .danger-button img { width: 18px; height: 18px; filter: invert(39%) sepia(34%) saturate(1450%) hue-rotate(315deg) brightness(96%) contrast(82%); }
 .dashboard-info-head { margin-bottom: 18px; }
@@ -367,6 +367,7 @@ code { color: var(--blue-strong); font-family: ui-monospace, SFMono-Regular, Con
   .log-settings-head form { width: 100%; margin-left: 0; }
   .log-settings-head .danger-button { width: 100%; }
   .retention-form { grid-template-columns: 1fr; }
+  .settings-primary-action, .retention-form button { width: 100%; }
   .retention-note { grid-column: auto; }
   .page-head { align-items: flex-start; }
   .page-head > form, .page-head > .button { margin-top: 6px; }

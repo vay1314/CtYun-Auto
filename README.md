@@ -4,6 +4,20 @@
 
 > 非中国电信或天翼云官方项目。平台接口可能调整，请遵守服务条款并自行评估使用风险。
 
+## 界面预览
+
+### 仪表盘
+
+![仪表盘](docs/screenshots/01-dashboard.png)
+
+### 账号管理
+
+![账号管理](docs/screenshots/02-accounts.png)
+
+### 任务中心
+
+![任务中心](docs/screenshots/03-tasks.png)
+
 ## 快速启动
 
 ```bash
