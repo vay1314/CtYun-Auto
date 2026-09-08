@@ -372,7 +372,7 @@ func (m *Manager) RestartKeepalive() {
 	m.clients = map[int64]*clientState{}
 	m.mu.Unlock()
 	for _, a := range accounts {
-		if a.Enabled && a.DeviceStatus != "pending" {
+		if a.Enabled && a.KeepaliveEnabled && a.DeviceStatus != "pending" {
 			a := a
 			go m.startAccount(a)
 		}
@@ -638,6 +638,41 @@ func (m *Manager) AccountStatus(id int64) string {
 	return "未启动"
 }
 
+func scheduledTaskKey(typ string) string {
+	if typ == "pc" {
+		return "usage"
+	}
+	return typ
+}
+
+func statusUpdatedToday(value string, now time.Time) bool {
+	updated, e := time.Parse(time.RFC3339, value)
+	if e != nil {
+		return false
+	}
+	updated = updated.In(now.Location())
+	return updated.Year() == now.Year() && updated.YearDay() == now.YearDay()
+}
+
+func (m *Manager) startScheduledTask(a storage.Account, typ string, now time.Time) {
+	// Query first so a second Cron time or a service restart does not repeat a
+	// task which the platform has already credited today. If the query itself
+	// fails, still run the task and let its own login recovery handle it.
+	ctx, cancel := context.WithTimeout(m.ctx, 90*time.Second)
+	status, e := m.RefreshStatus(ctx, a.ID)
+	cancel()
+	key := scheduledTaskKey(typ)
+	if e == nil && statusUpdatedToday(status.UpdatedAt, now) {
+		if task, ok := status.Tasks[key]; ok && task.State == "success" {
+			m.logf("[%s] 今日%s已完成，跳过定时执行", a.Name, map[string]string{"login": "登录任务", "pc": "时长任务", "chat": "AI 对话任务"}[typ])
+			return
+		}
+	}
+	if _, e = m.StartTask(a.ID, typ, "schedule"); e != nil && !strings.Contains(e.Error(), "已在运行") {
+		m.logf("[%s] 启动定时任务失败：%v", a.Name, e)
+	}
+}
+
 func normalizeTasks(tasks []ctyun.Task) map[string]storage.TaskStatus {
 	out := map[string]storage.TaskStatus{}
 	for _, t := range tasks {
@@ -734,10 +769,10 @@ func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
 	m.mu.Lock()
 	m.active[runID] = running{cancel: cancel, typ: fmt.Sprintf("%d:%s", id, typ)}
 	m.mu.Unlock()
-	go m.run(ctx, cancel, runID, id, typ, path)
+	go m.run(ctx, cancel, runID, id, typ, trigger, path)
 	return runID, nil
 }
-func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, accountID int64, typ, path string) {
+func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, accountID int64, typ, trigger, path string) {
 	defer cancel()
 	_ = m.store.UpdateRun(runID, "running", "")
 	f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
@@ -745,19 +780,51 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 	defer f.Close()
 	logger.Printf("开始%s任务", map[string]string{"login": "登录 AI 云电脑", "chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ])
 	a, e := m.store.Account(accountID)
-	if e == nil && typ == "chat" {
-		e = m.runChat(ctx, a, logger)
-	} else if e == nil {
+	execute := func() error {
+		if typ == "chat" {
+			return m.runChat(ctx, a, logger)
+		}
 		var c *ctyun.Client
-		c, e = m.client(ctx, a)
-		if e == nil {
-			switch typ {
-			case "login":
-				e = m.activateDesktopLogin(ctx, a, c, logger)
-			case "pc":
-				e = m.waitUsage(ctx, c, logger)
-			case "redeem":
-				e = m.redeem(ctx, a, c, logger)
+		c, clientErr := m.client(ctx, a)
+		if clientErr != nil {
+			return clientErr
+		}
+		switch typ {
+		case "login":
+			return m.activateDesktopLogin(ctx, a, c, logger)
+		case "pc":
+			return m.runUsage(ctx, a, c, logger)
+		case "redeem":
+			return m.redeem(ctx, a, c, logger)
+		}
+		return nil
+	}
+	if e == nil {
+		attempts := 1
+		if trigger == "schedule" && typ != "redeem" {
+			attempts = 3
+		}
+		for attempt := 1; attempt <= attempts; attempt++ {
+			e = execute()
+			if e == nil || errors.Is(e, context.Canceled) || attempt == attempts {
+				break
+			}
+			logger.Printf("第 %d 次执行失败：%v；10 分钟后自动重试", attempt, e)
+			select {
+			case <-ctx.Done():
+				e = ctx.Err()
+				break
+			case <-time.After(10 * time.Minute):
+			}
+			if e != nil && errors.Is(e, context.Canceled) {
+				break
+			}
+			if status, refreshErr := m.RefreshStatus(ctx, accountID); refreshErr == nil {
+				if task, ok := status.Tasks[scheduledTaskKey(typ)]; ok && task.State == "success" {
+					logger.Printf("平台已确认今日任务完成，取消重试")
+					e = nil
+					break
+				}
 			}
 		}
 	}
@@ -855,13 +922,19 @@ func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c
 	}
 	return errors.New("没有可激活登录会话的运行中云电脑")
 }
-func (m *Manager) waitUsage(ctx context.Context, c *ctyun.Client, l *log.Logger) error {
+func (m *Manager) waitUsage(ctx context.Context, accountID int64, c *ctyun.Client, l *log.Logger) error {
 	deadline := time.Now().Add(80 * time.Minute)
 	for {
 		tasks, e := c.Tasks(ctx)
 		if e != nil {
 			return e
 		}
+		platforms, _ := m.store.Platforms()
+		progress := platforms[accountID]
+		progress.AccountID = accountID
+		progress.Tasks = normalizeTasks(tasks)
+		progress.Error = ""
+		_ = m.store.SavePlatform(progress)
 		for _, t := range tasks {
 			if t.ID == 1003 || strings.Contains(t.Name, "使用1小时") {
 				l.Printf("当前使用进度：%d/%d", t.Current, t.Total)
@@ -879,6 +952,89 @@ func (m *Manager) waitUsage(ctx context.Context, c *ctyun.Client, l *log.Logger)
 		case <-time.After(30 * time.Second):
 		}
 	}
+}
+
+// runUsage uses an existing all-day keepalive when available. If keepalive is
+// disabled, it creates one temporary desktop session and closes it as soon as
+// the platform confirms the daily one-hour task.
+func (m *Manager) runUsage(ctx context.Context, a storage.Account, c *ctyun.Client, l *log.Logger) error {
+	tasks, e := c.Tasks(ctx)
+	if e == nil {
+		if task, ok := normalizeTasks(tasks)["usage"]; ok && task.State == "success" {
+			l.Printf("平台已确认今日时长任务完成，无需重复连接")
+			return nil
+		}
+	}
+	m.mu.RLock()
+	liveSession := m.clients[a.ID] != nil && m.clients[a.ID].workers > 0
+	m.mu.RUnlock()
+	if liveSession {
+		l.Printf("复用现有持续保活连接累计使用时长")
+		return m.waitUsage(ctx, a.ID, c, l)
+	}
+
+	desktops, e := c.ListDesktops(ctx)
+	if e != nil {
+		return e
+	}
+	for _, desktop := range desktops {
+		if desktop.Forbidden {
+			continue
+		}
+		if !desktop.Running() {
+			desktop, e = waitForDesktopRunning(ctx, c, desktop, func(message string) { l.Printf("%s：%s", desktop.Name(), message) })
+			if e != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				l.Printf("%s 自动开机失败：%v", desktop.Name(), e)
+				continue
+			}
+		}
+		info, connectErr := waitForConnectionInfo(ctx, c, desktop, func(message string) { l.Printf("%s：%s", desktop.Name(), message) }, 90*time.Second)
+		if connectErr != nil {
+			l.Printf("%s 获取连接信息失败：%v", desktop.Name(), connectErr)
+			continue
+		}
+		if c.Profile == nil {
+			return errors.New("云电脑登录状态不可用")
+		}
+		if reportErr := c.ReportDesktopLogin(ctx, desktop); reportErr != nil {
+			l.Printf("平台登录事件上报未确认：%v", reportErr)
+		}
+		temporaryCtx, stopTemporary := context.WithCancel(ctx)
+		defer stopTemporary()
+		activated := make(chan struct{})
+		var activatedOnce sync.Once
+		connectionErr := make(chan error, 1)
+		refresh := func(refreshCtx context.Context) (ctyun.ConnectionInfo, error) {
+			return waitForConnectionInfo(refreshCtx, c, desktop, nil, 30*time.Second)
+		}
+		profile := *c.Profile
+		go func() {
+			connectionErr <- ctyun.RunClink(temporaryCtx, info, profile, a.DeviceCode, refresh, func(status string) {
+				l.Printf("%s：%s", desktop.Name(), status)
+				if strings.Contains(status, "桌面登录会话已激活") {
+					activatedOnce.Do(func() { close(activated) })
+				}
+			})
+		}()
+		l.Printf("已启动临时时长连接，完成每日 1 小时任务后将自动断开")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case runErr := <-connectionErr:
+			if runErr == nil {
+				return errors.New("临时时长连接意外结束")
+			}
+			return fmt.Errorf("建立临时时长连接：%w", runErr)
+		case <-activated:
+			return m.waitUsage(ctx, a.ID, c, l)
+		case <-time.After(60 * time.Second):
+			return errors.New("等待临时时长连接激活超时")
+		}
+	}
+	return errors.New("没有可用于时长任务的云电脑")
 }
 func (m *Manager) StopTask(id int64) bool {
 	m.mu.RLock()
@@ -1053,7 +1209,7 @@ func (m *Manager) scheduler() {
 				checks := []struct {
 					on        bool
 					expr, typ string
-				}{{a.ChatEnabled, a.ChatCron, "chat"}, {a.PCEnabled, a.PCCron, "pc"}}
+				}{{a.LoginEnabled, a.LoginCron, "login"}, {a.PCEnabled, a.PCCron, "pc"}, {a.ChatEnabled, a.ChatCron, "chat"}}
 				for _, x := range checks {
 					if !x.on {
 						continue
@@ -1066,7 +1222,8 @@ func (m *Manager) scheduler() {
 					if !prev.After(now) {
 						minute := now.Format("200601021504")
 						if m.store.Claim(a.ID, x.typ, minute) {
-							_, _ = m.StartTask(a.ID, x.typ, "schedule")
+							a := a
+							go m.startScheduledTask(a, x.typ, now)
 						}
 					}
 				}

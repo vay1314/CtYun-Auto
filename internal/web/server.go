@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/vay1314/CtYun-Keeper/internal/ctyun"
 	"github.com/vay1314/CtYun-Keeper/internal/security"
 	"github.com/vay1314/CtYun-Keeper/internal/service"
@@ -340,6 +341,16 @@ func (s *Server) dashboardMetrics() string {
 	runningAccounts := s.manager.RunningAccountCount()
 
 	keepaliveText := "当前没有云电脑正在保活"
+	keepaliveAccounts := 0
+	for _, account := range accounts {
+		if account.Enabled && account.KeepaliveEnabled {
+			keepaliveAccounts++
+		}
+	}
+	if keepaliveAccounts == 0 {
+		state = "已关闭"
+		keepaliveText = "未启用 24 小时持续保活"
+	}
 	if workers > 0 {
 		keepaliveText = fmt.Sprintf("正在保活 %d 台云电脑", workers)
 	}
@@ -402,10 +413,14 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 func (s *Server) accountTable() string {
 	values, _ := s.store.Accounts()
 	var b strings.Builder
-	b.WriteString(`<article id=account-table class="panel table-panel" hx-get=/partials/accounts hx-trigger="every 5s" hx-swap=outerHTML><div class=table-wrap><table><thead><tr><th>账号</th><th>保活</th><th>AI 对话</th><th>挂机</th><th>操作</th></tr></thead><tbody>`)
+	b.WriteString(`<article id=account-table class="panel table-panel" hx-get=/partials/accounts hx-trigger="every 5s" hx-swap=outerHTML><div class=table-wrap><table><thead><tr><th>账号</th><th>持续保活</th><th>登录任务</th><th>AI 对话任务</th><th>时长任务</th><th>操作</th></tr></thead><tbody>`)
 	for _, a := range values {
 		status := s.manager.AccountStatus(a.ID)
-		fmt.Fprintf(&b, `<tr><td><strong>%s</strong><small>%s</small></td><td><span class="pill %s">%s</span><small>%s</small></td><td>%s</td><td>%s</td><td class=actions><a href="/accounts/%d/edit">编辑</a><a href="/accounts/%d/redeem">兑换</a><form method=post action="/accounts/%d/device-verification/start"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=link-button>设备验证</button></form><form method=post action="/accounts/%d/delete"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>删除</button></form></td></tr>`, esc(a.Name), esc(mask(a.Username)), map[bool]string{true: "success", false: "warning"}[a.Enabled], map[bool]string{true: "启用", false: "停用"}[a.Enabled], esc(status), esc(a.ChatCron), esc(a.PCCron), a.ID, a.ID, a.ID, a.ID)
+		keepaliveStatus := status
+		if !a.KeepaliveEnabled {
+			keepaliveStatus = "持续保活已关闭"
+		}
+		fmt.Fprintf(&b, `<tr><td><strong>%s</strong><small>%s</small></td><td><span class="pill %s">%s</span><small>%s</small></td><td>%s</td><td>%s</td><td>%s</td><td class=actions><a href="/accounts/%d/edit">编辑</a><a href="/accounts/%d/redeem">兑换</a><form method=post action="/accounts/%d/device-verification/start"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=link-button>设备验证</button></form><form method=post action="/accounts/%d/delete"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>删除</button></form></td></tr>`, esc(a.Name), esc(mask(a.Username)), map[bool]string{true: "success", false: "warning"}[a.Enabled && a.KeepaliveEnabled], map[bool]string{true: "启用", false: "关闭"}[a.Enabled && a.KeepaliveEnabled], esc(keepaliveStatus), scheduleSummary(a.LoginEnabled, a.LoginCron), scheduleSummary(a.ChatEnabled, a.ChatCron), scheduleSummary(a.PCEnabled, a.PCCron), a.ID, a.ID, a.ID, a.ID)
 	}
 	b.WriteString(`</tbody></table></div></article>`)
 	return b.String()
@@ -428,7 +443,14 @@ func (s *Server) accountNew(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	s.accountForm(w, r, storage.Account{Enabled: true, ChatEnabled: true, PCEnabled: true, ChatCron: "0 3,20 * * *", PCCron: "0 4,6 * * *", DeviceCode: security.RandomToken(24)})
+	s.accountForm(w, r, storage.Account{Enabled: true, KeepaliveEnabled: true, LoginEnabled: true, LoginCron: "0 3 * * *", PCEnabled: true, PCCron: "5 3 * * *", ChatEnabled: true, ChatCron: "10 3 * * *", DeviceCode: security.RandomToken(24)})
+}
+
+func scheduleSummary(enabled bool, expression string) string {
+	if !enabled {
+		return `<span class="pill warning">关闭</span>`
+	}
+	return `<span class="pill success">启用</span><small>` + esc(expression) + `</small>`
 }
 func (s *Server) accountForm(w http.ResponseWriter, r *http.Request, a storage.Account) {
 	title := "添加账号"
@@ -437,7 +459,7 @@ func (s *Server) accountForm(w http.ResponseWriter, r *http.Request, a storage.A
 		title = "编辑账号"
 		required = ""
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<div class=password-field><input name=password type=password%s placeholder="%s">%s</div></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号和保活</span></label></fieldset><fieldset><legend>积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话积分</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用云电脑挂机</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], passwordToggle(), esc(a.DeviceCode), checked(a.Enabled), checked(a.ChatEnabled), esc(a.ChatCron), checked(a.PCEnabled), esc(a.PCCron))
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<div class=password-field><input name=password type=password%s placeholder="%s">%s</div></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号</span></label><label class=switch-row><input type=checkbox name=keepalive_enabled%s><span>启用 24 小时持续保活</span></label><p class=muted>关闭持续保活后，每日积分任务仍会按计划执行；时长任务会临时连接云电脑，完成 1 小时后自动断开。</p></fieldset><fieldset><legend>每日积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=login_enabled%s><span>启用登录任务</span></label><label>Cron 计划<input name=login_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用时长任务</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话任务</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], passwordToggle(), esc(a.DeviceCode), checked(a.Enabled), checked(a.KeepaliveEnabled), checked(a.LoginEnabled), esc(a.LoginCron), checked(a.PCEnabled), esc(a.PCCron), checked(a.ChatEnabled), esc(a.ChatCron))
 	s.page(w, r, title, content, true)
 }
 func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
@@ -450,7 +472,14 @@ func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.FormValue("account_id"), 10, 64)
-	a := storage.Account{ID: id, Name: strings.TrimSpace(r.FormValue("name")), Username: strings.TrimSpace(r.FormValue("username")), DeviceCode: strings.TrimSpace(r.FormValue("device_code")), Enabled: r.Form.Has("enabled"), ChatEnabled: r.Form.Has("chat_enabled"), ChatCron: r.FormValue("chat_cron"), PCEnabled: r.Form.Has("pc_enabled"), PCCron: r.FormValue("pc_cron")}
+	a := storage.Account{ID: id, Name: strings.TrimSpace(r.FormValue("name")), Username: strings.TrimSpace(r.FormValue("username")), DeviceCode: strings.TrimSpace(r.FormValue("device_code")), Enabled: r.Form.Has("enabled"), KeepaliveEnabled: r.Form.Has("keepalive_enabled"), LoginEnabled: r.Form.Has("login_enabled"), LoginCron: strings.TrimSpace(r.FormValue("login_cron")), ChatEnabled: r.Form.Has("chat_enabled"), ChatCron: strings.TrimSpace(r.FormValue("chat_cron")), PCEnabled: r.Form.Has("pc_enabled"), PCCron: strings.TrimSpace(r.FormValue("pc_cron"))}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	for _, schedule := range []struct{ label, expression string }{{"登录任务", a.LoginCron}, {"时长任务", a.PCCron}, {"AI 对话任务", a.ChatCron}} {
+		if _, parseErr := parser.Parse(schedule.expression); parseErr != nil {
+			redirect(w, r, "/accounts", schedule.label+"的 Cron 计划格式不正确", true)
+			return
+		}
+	}
 	saved, e := s.store.SaveAccount(a, r.FormValue("password"), s.credentialKey, security.EncryptFernet)
 	if e != nil {
 		redirect(w, r, "/accounts", e.Error(), true)
@@ -470,7 +499,11 @@ func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if bound {
 		s.manager.RestartKeepalive()
-		redirect(w, r, "/accounts", "账号已保存并开始保活", false)
+		message := "账号已保存，积分任务计划已生效"
+		if a.KeepaliveEnabled {
+			message = "账号已保存，持续保活和积分任务计划已生效"
+		}
+		redirect(w, r, "/accounts", message, false)
 	} else {
 		redirect(w, r, fmt.Sprintf("/accounts/%d/device-verification", saved), "短信验证码已发送", false)
 	}

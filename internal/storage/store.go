@@ -12,9 +12,9 @@ import (
 
 type Store struct{ DB *sql.DB }
 type Account struct {
-	ID                                                                            int64
-	Name, Username, PasswordEncrypted, DeviceCode, ChatCron, PCCron, DeviceStatus string
-	Enabled, ChatEnabled, PCEnabled                                               bool
+	ID                                                                                       int64
+	Name, Username, PasswordEncrypted, DeviceCode, LoginCron, ChatCron, PCCron, DeviceStatus string
+	Enabled, KeepaliveEnabled, LoginEnabled, ChatEnabled, PCEnabled                          bool
 }
 type Run struct {
 	ID, AccountID                                                                   int64
@@ -61,7 +61,7 @@ func Now() string             { return time.Now().Format(time.RFC3339) }
 func (s *Store) Init() error {
 	_, err := s.DB.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000;
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,password_encrypted TEXT NOT NULL,device_code TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,chat_enabled INTEGER NOT NULL DEFAULT 1,chat_cron TEXT NOT NULL DEFAULT '0 3,20 * * *',pc_enabled INTEGER NOT NULL DEFAULT 1,pc_cron TEXT NOT NULL DEFAULT '0 4,6 * * *',device_status TEXT NOT NULL DEFAULT 'unknown',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,password_encrypted TEXT NOT NULL,device_code TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,keepalive_enabled INTEGER NOT NULL DEFAULT 1,login_enabled INTEGER NOT NULL DEFAULT 1,login_cron TEXT NOT NULL DEFAULT '0 3 * * *',chat_enabled INTEGER NOT NULL DEFAULT 1,chat_cron TEXT NOT NULL DEFAULT '10 3 * * *',pc_enabled INTEGER NOT NULL DEFAULT 1,pc_cron TEXT NOT NULL DEFAULT '5 3 * * *',device_status TEXT NOT NULL DEFAULT 'unknown',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,task_type TEXT NOT NULL,trigger_source TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,exit_code INTEGER,log_path TEXT NOT NULL,message TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS scheduler_claims(account_id INTEGER NOT NULL,task_type TEXT NOT NULL,minute_key TEXT NOT NULL,PRIMARY KEY(account_id,task_type,minute_key));
 CREATE TABLE IF NOT EXISTS account_platform_status(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,total_points INTEGER,tasks_json TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');
@@ -71,6 +71,23 @@ CREATE TABLE IF NOT EXISTS redeem_configs(account_id INTEGER PRIMARY KEY REFEREN
 CREATE TABLE IF NOT EXISTS redeem_states(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,last_attempt_date TEXT NOT NULL DEFAULT '',last_attempt_status TEXT NOT NULL DEFAULT '',last_success_date TEXT NOT NULL DEFAULT '',last_redeem_times INTEGER NOT NULL DEFAULT 0,last_points_spent INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_task_runs_started_at ON task_runs(started_at DESC);`)
 	if err == nil {
+		// Existing databases predate the independent keepalive and login-task
+		// switches. Preserve their previous behaviour while adding the new fields.
+		for _, migration := range []struct{ name, definition string }{
+			{"keepalive_enabled", "INTEGER NOT NULL DEFAULT 1"},
+			{"login_enabled", "INTEGER NOT NULL DEFAULT 1"},
+			{"login_cron", "TEXT NOT NULL DEFAULT '0 3 * * *'"},
+		} {
+			var count int
+			if e := s.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name=?", migration.name).Scan(&count); e != nil {
+				return e
+			}
+			if count == 0 {
+				if _, e := s.DB.Exec("ALTER TABLE accounts ADD COLUMN " + migration.name + " " + migration.definition); e != nil {
+					return e
+				}
+			}
+		}
 		_, err = s.DB.Exec("UPDATE task_runs SET status='interrupted',finished_at=?,message='服务重启，任务状态已重置' WHERE status IN ('queued','running')", Now())
 	}
 	return err
@@ -89,15 +106,17 @@ func (s *Store) SetSetting(k, v string) error {
 }
 func scanAccount(r interface{ Scan(...any) error }) (Account, error) {
 	var a Account
-	var en, ch, pc int
-	e := r.Scan(&a.ID, &a.Name, &a.Username, &a.PasswordEncrypted, &a.DeviceCode, &en, &ch, &a.ChatCron, &pc, &a.PCCron, &a.DeviceStatus)
+	var en, keepalive, login, ch, pc int
+	e := r.Scan(&a.ID, &a.Name, &a.Username, &a.PasswordEncrypted, &a.DeviceCode, &en, &keepalive, &login, &a.LoginCron, &ch, &a.ChatCron, &pc, &a.PCCron, &a.DeviceStatus)
 	a.Enabled = en != 0
+	a.KeepaliveEnabled = keepalive != 0
+	a.LoginEnabled = login != 0
 	a.ChatEnabled = ch != 0
 	a.PCEnabled = pc != 0
 	return a, e
 }
 
-const accountCols = "id,name,username,password_encrypted,device_code,enabled,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status"
+const accountCols = "id,name,username,password_encrypted,device_code,enabled,keepalive_enabled,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status"
 
 func (s *Store) Accounts() ([]Account, error) {
 	rows, e := s.DB.Query("SELECT " + accountCols + " FROM accounts ORDER BY id")
@@ -131,7 +150,7 @@ func (s *Store) SaveAccount(a Account, password string, key []byte, encrypt func
 		if e != nil {
 			return 0, e
 		}
-		r, e := s.DB.Exec(`INSERT INTO accounts(name,username,password_encrypted,device_code,enabled,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'unknown',?,?)`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, now, now)
+		r, e := s.DB.Exec(`INSERT INTO accounts(name,username,password_encrypted,device_code,enabled,keepalive_enabled,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'unknown',?,?)`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, now, now)
 		if e != nil {
 			return 0, e
 		}
@@ -148,7 +167,7 @@ func (s *Store) SaveAccount(a Account, password string, key []byte, encrypt func
 			return 0, e
 		}
 	}
-	_, e = s.DB.Exec(`UPDATE accounts SET name=?,username=?,password_encrypted=?,device_code=?,enabled=?,chat_enabled=?,chat_cron=?,pc_enabled=?,pc_cron=?,device_status=CASE WHEN username<>? OR device_code<>? THEN 'unknown' ELSE device_status END,updated_at=? WHERE id=?`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, a.Username, a.DeviceCode, now, a.ID)
+	_, e = s.DB.Exec(`UPDATE accounts SET name=?,username=?,password_encrypted=?,device_code=?,enabled=?,keepalive_enabled=?,login_enabled=?,login_cron=?,chat_enabled=?,chat_cron=?,pc_enabled=?,pc_cron=?,device_status=CASE WHEN username<>? OR device_code<>? THEN 'unknown' ELSE device_status END,updated_at=? WHERE id=?`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, a.Username, a.DeviceCode, now, a.ID)
 	return a.ID, e
 }
 func (s *Store) DeleteAccount(id int64) error {

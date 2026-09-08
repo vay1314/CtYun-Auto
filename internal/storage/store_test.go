@@ -1,10 +1,46 @@
 package storage
 
 import (
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestLegacyAccountMigrationEnablesExistingKeepaliveAndLoginTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE accounts(
+		id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,
+		password_encrypted TEXT NOT NULL,device_code TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,
+		chat_enabled INTEGER NOT NULL DEFAULT 1,chat_cron TEXT NOT NULL DEFAULT '0 3,20 * * *',
+		pc_enabled INTEGER NOT NULL DEFAULT 1,pc_cron TEXT NOT NULL DEFAULT '0 4,6 * * *',
+		device_status TEXT NOT NULL DEFAULT 'unknown',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+		INSERT INTO accounts(name,username,password_encrypted,device_code,enabled,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status,created_at,updated_at)
+		VALUES('legacy','user','password','device',1,1,'0 3,20 * * *',1,'0 4,6 * * *','verified','now','now');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a, err := s.Account(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.KeepaliveEnabled || !a.LoginEnabled || a.LoginCron != "0 3 * * *" {
+		t.Fatalf("legacy defaults not migrated: %#v", a)
+	}
+}
 
 func TestOpenAndMigrate(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
@@ -49,6 +85,30 @@ func TestNativeAuthCacheRoundTrip(t *testing.T) {
 	web, err := s.AuthCache(id)
 	if err != nil || web != "encrypted-web-profile" {
 		t.Fatalf("clearing native cache changed Web cache: %q, %v", web, err)
+	}
+}
+
+func TestAccountAutomationSettingsRoundTrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := Account{
+		Name: "scheduled", Username: "user", DeviceCode: "device", Enabled: true,
+		KeepaliveEnabled: false, LoginEnabled: true, LoginCron: "0 2 * * *",
+		PCEnabled: true, PCCron: "5 2 * * *", ChatEnabled: true, ChatCron: "10 2 * * *",
+	}
+	id, err := s.SaveAccount(a, "password", []byte("unused"), func(value string, _ []byte) (string, error) { return value, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Account(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KeepaliveEnabled || !got.LoginEnabled || got.LoginCron != a.LoginCron || got.PCCron != a.PCCron || got.ChatCron != a.ChatCron {
+		t.Fatalf("automation settings were not preserved: %#v", got)
 	}
 }
 
