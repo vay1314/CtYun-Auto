@@ -60,10 +60,13 @@ func (s *Server) routes(staticDir string) {
 	s.mux.HandleFunc("/partials/task-accounts", s.taskCards)
 	s.mux.HandleFunc("/tasks/", s.taskRoute)
 	s.mux.HandleFunc("/tasks", s.tasks)
+	s.mux.HandleFunc("/logs/clear", s.clearLog)
 	s.mux.HandleFunc("/logs", s.logs)
 	s.mux.HandleFunc("/logs/", s.logStream)
 	s.mux.HandleFunc("/ctyun/restart", s.restart)
 	s.mux.HandleFunc("/settings/password", s.password)
+	s.mux.HandleFunc("/settings/logs/clear", s.clearAllLogs)
+	s.mux.HandleFunc("/settings/logs", s.logSettings)
 	s.mux.HandleFunc("/settings", s.settings)
 	s.mux.HandleFunc("/api/status", s.apiStatus)
 	s.mux.HandleFunc("/api/accounts/", s.apiAccountRoute)
@@ -737,8 +740,36 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		attrs = ` id="log-output" data-stream="/logs/` + strconv.FormatInt(selected.ID, 10) + `/stream" data-offset="` + strconv.FormatInt(fileSize, 10) + `"`
 		indicator = `<span class="live-indicator"><i></i>实时输出</span>`
 	}
-	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + s.logSources(runs, selected.ID) + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + indicator + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
+	clearID := "0"
+	if selected.ID != 0 {
+		clearID = strconv.FormatInt(selected.ID, 10)
+	}
+	clearAction := `<div class=log-panel-actions><form method=post action=/logs/clear data-confirm="确认清空当前日志？清空后无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=run_id value="` + clearID + `"><button class="icon-button log-clear-button" type=submit title="清空当前日志" aria-label="清空当前日志"><span class="material-symbols-rounded">delete_sweep</span></button></form>` + indicator + `</div>`
+	content := `<header class=page-head><div><p class=eyebrow>诊断</p><h1>日志中心</h1><p class=page-subtitle>集中查看系统运行日志和每次自动化任务的独立日志。</p></div></header><section class=log-layout>` + s.logSources(runs, selected.ID) + `<article class="panel log-panel"><div class=log-panel-head><div><h2>` + esc(logTitle) + `</h2><p>` + esc(logMeta) + `</p></div>` + clearAction + `</div><pre class=log-output` + attrs + `>` + esc(string(raw)) + `</pre></article></section>`
 	s.page(w, r, "日志", content, true)
+}
+func (s *Server) clearLog(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	runID, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("run_id")), 10, 64)
+	if err != nil || runID < 0 {
+		redirect(w, r, "/logs", "日志类型无效", true)
+		return
+	}
+	if err := s.manager.ClearLog(runID); err != nil {
+		redirect(w, r, "/logs", "清空日志失败："+err.Error(), true)
+		return
+	}
+	target := "/logs"
+	if runID > 0 {
+		target += "?run_id=" + strconv.FormatInt(runID, 10)
+	}
+	redirect(w, r, target, "当前日志已清空", false)
 }
 func (s *Server) logSources(runs []storage.Run, selectedID int64) string {
 	var sources strings.Builder
@@ -814,6 +845,13 @@ func (s *Server) logStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		f, e := os.Open(path)
 		if e == nil {
+			if info, statErr := f.Stat(); statErr == nil && info.Size() < offset {
+				offset = 0
+				fmt.Fprint(w, "event: reset\ndata: true\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			_, _ = f.Seek(offset, io.SeekStart)
 			raw, _ := io.ReadAll(f)
 			offset, _ = f.Seek(0, io.SeekCurrent)
@@ -861,8 +899,41 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>设置</h1></div></header><section class=settings-grid><form method=post action=/settings/password class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><h2>修改管理密码</h2><label>当前密码<input name=current_password type=password required></label><label>新密码<input name=password type=password minlength=8 required></label><label>确认新密码<input name=confirmation type=password minlength=8 required></label><button class=primary>更新密码</button></form><article class="panel info-panel"><h2>当前部署</h2><dl><div><dt>端口</dt><dd>9845</dd></div><div><dt>版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go / Alpine / 单进程</dd></div></dl></article></section>`, esc(s.version))
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>设置</h1></div></header><section class=settings-grid><form method=post action=/settings/password class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><h2>修改管理密码</h2><label>当前密码<input name=current_password type=password required></label><label>新密码<input name=password type=password minlength=8 required></label><label>确认新密码<input name=confirmation type=password minlength=8 required></label><button class=primary>更新密码</button></form><article class="panel info-panel"><h2>当前部署</h2><dl><div><dt>端口</dt><dd>9845</dd></div><div><dt>版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go / Alpine / 单进程</dd></div></dl></article><article class="panel form-panel log-settings-panel"><div class=panel-title><span class="panel-icon material-symbols-rounded">history</span><div><p class=eyebrow>存储管理</p><h2>日志设置</h2></div></div><form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<input name=retention_days type=number min=1 max=3650 value="%d" required></label><p class=muted>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p><button class=primary>保存日志设置</button></form><div class=danger-zone><div><strong>清空全部日志</strong><p>清空运行日志与全部任务日志，并保留任务历史记录；正在执行的任务可以继续写入新日志。</p></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><span class="material-symbols-rounded">delete_forever</span>清空全部日志</button></form></div></article></section>`, esc(s.version), s.manager.LogRetentionDays())
 	s.page(w, r, "设置", content, true)
+}
+func (s *Server) logSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	days, err := strconv.Atoi(strings.TrimSpace(r.FormValue("retention_days")))
+	if err != nil || days < 1 || days > 3650 {
+		redirect(w, r, "/settings", "日志保留天数必须在 1 到 3650 天之间", true)
+		return
+	}
+	if err := s.manager.SetLogRetentionDays(days); err != nil {
+		redirect(w, r, "/settings", "保存日志设置失败："+err.Error(), true)
+		return
+	}
+	redirect(w, r, "/settings", "日志设置已保存", false)
+}
+func (s *Server) clearAllLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if err := s.manager.ClearAllLogs(); err != nil {
+		redirect(w, r, "/settings", "清空全部日志失败："+err.Error(), true)
+		return
+	}
+	redirect(w, r, "/settings", "全部日志已清空", false)
 }
 func (s *Server) password(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) || r.Method != "POST" {

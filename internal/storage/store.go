@@ -204,6 +204,62 @@ func (s *Store) Runs(limit int) ([]Run, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) Run(id int64) (Run, error) {
+	var v Run
+	e := s.DB.QueryRow(`SELECT r.id,COALESCE(r.account_id,0),COALESCE(a.name,''),r.task_type,r.trigger_source,r.status,r.started_at,COALESCE(r.finished_at,''),r.log_path,r.message FROM task_runs r LEFT JOIN accounts a ON a.id=r.account_id WHERE r.id=?`, id).Scan(&v.ID, &v.AccountID, &v.AccountName, &v.TaskType, &v.Trigger, &v.Status, &v.StartedAt, &v.FinishedAt, &v.LogPath, &v.Message)
+	return v, e
+}
+
+func (s *Store) RunLogs() ([]Run, error) {
+	rows, e := s.DB.Query(`SELECT id,status,log_path FROM task_runs ORDER BY id DESC`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var v Run
+		if e = rows.Scan(&v.ID, &v.Status, &v.LogPath); e != nil {
+			return nil, e
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PurgeCompletedRunsBefore(cutoff string) ([]string, error) {
+	tx, e := s.DB.Begin()
+	if e != nil {
+		return nil, e
+	}
+	defer tx.Rollback()
+	rows, e := tx.Query(`SELECT log_path FROM task_runs WHERE status NOT IN ('queued','running') AND COALESCE(NULLIF(finished_at,''),started_at) < ?`, cutoff)
+	if e != nil {
+		return nil, e
+	}
+	var paths []string
+	for rows.Next() {
+		var path string
+		if e = rows.Scan(&path); e != nil {
+			rows.Close()
+			return nil, e
+		}
+		paths = append(paths, path)
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return nil, e
+	}
+	if _, e = tx.Exec(`DELETE FROM task_runs WHERE status NOT IN ('queued','running') AND COALESCE(NULLIF(finished_at,''),started_at) < ?`, cutoff); e != nil {
+		return nil, e
+	}
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return paths, nil
+}
 func (s *Store) SavePlatform(v PlatformStatus) error {
 	raw, _ := json.Marshal(v.Tasks)
 	points := any(nil)

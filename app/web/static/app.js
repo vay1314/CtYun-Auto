@@ -71,6 +71,10 @@ document.addEventListener("DOMContentLoaded", () => {
     output.textContent = JSON.parse(event.data) + output.textContent;
     output.scrollTop = 0;
   };
+  stream.addEventListener("reset", () => {
+    output.textContent = "";
+    output.scrollTop = 0;
+  });
   stream.addEventListener("done", () => stream.close());
 });
 

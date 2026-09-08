@@ -40,6 +40,7 @@ type Manager struct {
 	credentialKey []byte
 	dataDir, ocr  string
 	logger        *log.Logger
+	logMu         sync.Mutex
 	mu            sync.RWMutex
 	clients       map[int64]*clientState
 	active        map[int64]running
@@ -55,7 +56,11 @@ func New(store *storage.Store, key []byte, dataDir, ocr string) *Manager {
 	f, _ := os.OpenFile(filepath.Join(dataDir, "logs", "ctyun.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
 	return &Manager{store: store, credentialKey: key, dataDir: dataDir, ocr: ocr, logger: log.New(f, "", log.LstdFlags), clients: map[int64]*clientState{}, active: map[int64]running{}, verify: map[int64]VerifySession{}, ctx: ctx, cancel: cancel, started: time.Now()}
 }
-func (m *Manager) Start() { m.RestartKeepalive(); go m.scheduler() }
+func (m *Manager) Start() {
+	m.RestartKeepalive()
+	_ = m.CleanupExpiredLogs()
+	go m.scheduler()
+}
 func (m *Manager) Close() {
 	m.cancel()
 	m.mu.Lock()
@@ -69,8 +74,142 @@ func (m *Manager) Close() {
 	}
 	m.mu.Unlock()
 }
-func (m *Manager) Started() time.Time           { return m.started }
-func (m *Manager) logf(format string, v ...any) { m.logger.Printf(format, v...) }
+func (m *Manager) Started() time.Time { return m.started }
+func (m *Manager) logf(format string, v ...any) {
+	m.logMu.Lock()
+	m.logger.Printf(format, v...)
+	m.logMu.Unlock()
+}
+
+func (m *Manager) LogRetentionDays() int {
+	value, _ := m.store.Setting("log_retention_days")
+	days, e := strconv.Atoi(value)
+	if e != nil || days < 1 || days > 3650 {
+		return 30
+	}
+	return days
+}
+
+func (m *Manager) SetLogRetentionDays(days int) error {
+	if days < 1 || days > 3650 {
+		return errors.New("日志保留天数必须在 1 到 3650 天之间")
+	}
+	if e := m.store.SetSetting("log_retention_days", strconv.Itoa(days)); e != nil {
+		return e
+	}
+	return m.CleanupExpiredLogs()
+}
+
+func (m *Manager) ClearLog(runID int64) error {
+	if runID == 0 {
+		m.logMu.Lock()
+		defer m.logMu.Unlock()
+		return truncateLogFile(filepath.Join(m.dataDir, "logs", "ctyun.log"))
+	}
+	run, e := m.store.Run(runID)
+	if e != nil {
+		return e
+	}
+	if !m.allowedTaskLog(run.LogPath) {
+		return errors.New("任务日志路径无效")
+	}
+	return truncateLogFile(run.LogPath)
+}
+
+func (m *Manager) ClearAllLogs() error {
+	if e := m.ClearLog(0); e != nil {
+		return e
+	}
+	runs, e := m.store.RunLogs()
+	if e != nil {
+		return e
+	}
+	var clearErrors []error
+	for _, run := range runs {
+		if !m.allowedTaskLog(run.LogPath) {
+			clearErrors = append(clearErrors, fmt.Errorf("任务 #%d 日志路径无效", run.ID))
+			continue
+		}
+		if run.Status == "queued" || run.Status == "running" {
+			if e := truncateLogFile(run.LogPath); e != nil {
+				clearErrors = append(clearErrors, e)
+			}
+			continue
+		}
+		if e := os.Remove(run.LogPath); e != nil && !errors.Is(e, os.ErrNotExist) {
+			clearErrors = append(clearErrors, e)
+		}
+	}
+	return errors.Join(clearErrors...)
+}
+
+func (m *Manager) CleanupExpiredLogs() error {
+	cutoff := time.Now().AddDate(0, 0, -m.LogRetentionDays())
+	if e := m.trimSystemLog(cutoff); e != nil {
+		return e
+	}
+	paths, e := m.store.PurgeCompletedRunsBefore(cutoff.Format(time.RFC3339))
+	if e != nil {
+		return e
+	}
+	for _, path := range paths {
+		if m.allowedTaskLog(path) {
+			_ = os.Remove(path)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) trimSystemLog(cutoff time.Time) error {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	path := filepath.Join(m.dataDir, "logs", "ctyun.log")
+	raw, e := os.ReadFile(path)
+	if e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(raw), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if len(line) >= 19 {
+			if stamp, parseErr := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local); parseErr == nil && stamp.Before(cutoff) {
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0640)
+}
+
+func (m *Manager) allowedTaskLog(path string) bool {
+	base, e := filepath.Abs(filepath.Join(m.dataDir, "logs", "tasks"))
+	if e != nil {
+		return false
+	}
+	target, e := filepath.Abs(path)
+	if e != nil {
+		return false
+	}
+	rel, e := filepath.Rel(base, target)
+	if e != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	if info, statErr := os.Lstat(target); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return true
+}
+
+func truncateLogFile(path string) error {
+	f, e := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	if e != nil {
+		return e
+	}
+	return f.Close()
+}
 func (m *Manager) newClient(a storage.Account) (*ctyun.Client, error) {
 	pwd, e := security.DecryptFernet(a.PasswordEncrypted, m.credentialKey)
 	if e != nil {
@@ -810,11 +949,18 @@ func (m *Manager) scheduler() {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
+	lastLogCleanup := ""
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case now := <-ticker.C:
+			if day := now.Format("20060102"); day != lastLogCleanup {
+				if e := m.CleanupExpiredLogs(); e != nil {
+					m.logf("自动清理过期日志失败：%v", e)
+				}
+				lastLogCleanup = day
+			}
 			accounts, _ := m.store.Accounts()
 			for _, a := range accounts {
 				if !a.Enabled || a.DeviceStatus == "pending" {
