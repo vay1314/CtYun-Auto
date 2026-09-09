@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,11 +41,14 @@ type Manager struct {
 	credentialKey []byte
 	dataDir, ocr  string
 	logger        *log.Logger
+	logFile       *os.File
 	logMu         sync.Mutex
+	logCloseOnce  sync.Once
 	mu            sync.RWMutex
 	clients       map[int64]*clientState
 	nativeClients map[int64]*ctyun.NativeClient
 	active        map[int64]running
+	starting      map[string]struct{}
 	verify        map[int64]VerifySession
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -55,7 +59,7 @@ func New(store *storage.Store, key []byte, dataDir, ocr string) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = os.MkdirAll(filepath.Join(dataDir, "logs"), 0750)
 	f, _ := os.OpenFile(filepath.Join(dataDir, "logs", "ctyun.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
-	return &Manager{store: store, credentialKey: key, dataDir: dataDir, ocr: ocr, logger: log.New(f, "", log.LstdFlags), clients: map[int64]*clientState{}, nativeClients: map[int64]*ctyun.NativeClient{}, active: map[int64]running{}, verify: map[int64]VerifySession{}, ctx: ctx, cancel: cancel, started: time.Now()}
+	return &Manager{store: store, credentialKey: key, dataDir: dataDir, ocr: ocr, logger: log.New(f, "", log.LstdFlags), logFile: f, clients: map[int64]*clientState{}, nativeClients: map[int64]*ctyun.NativeClient{}, active: map[int64]running{}, starting: map[string]struct{}{}, verify: map[int64]VerifySession{}, ctx: ctx, cancel: cancel, started: time.Now()}
 }
 func (m *Manager) Start() {
 	m.RestartKeepalive()
@@ -74,6 +78,11 @@ func (m *Manager) Close() {
 		r.cancel()
 	}
 	m.mu.Unlock()
+	m.logCloseOnce.Do(func() {
+		if m.logFile != nil {
+			_ = m.logFile.Close()
+		}
+	})
 }
 func (m *Manager) Started() time.Time { return m.started }
 func (m *Manager) logf(format string, v ...any) {
@@ -720,19 +729,18 @@ func (m *Manager) RefreshStatus(ctx context.Context, id int64) (storage.Platform
 	if e != nil {
 		return storage.PlatformStatus{}, e
 	}
-	c, e := m.client(ctx, a)
+	c, e := m.nativeClient(ctx, a)
 	if e != nil {
 		return storage.PlatformStatus{}, e
 	}
 	tasks, e := c.Tasks(ctx)
 	if e != nil {
-		c.Profile = nil
-		m.store.ClearAuthCache(id)
-		if _, le := c.Login(ctx); le == nil {
-			m.saveProfile(id, *c.Profile)
-			tasks, e = c.Tasks(ctx)
-		} else {
-			e = le
+		if ctyun.IsLoginExpired(e) {
+			c.ClearProfile()
+			m.store.ClearNativeAuthCache(id)
+			if c, e = m.nativeClient(ctx, a); e == nil {
+				tasks, e = c.Tasks(ctx)
+			}
 		}
 	}
 	if e != nil {
@@ -750,24 +758,34 @@ func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
 	if typ != "login" && typ != "chat" && typ != "pc" && typ != "redeem" {
 		return 0, errors.New("未知任务类型")
 	}
+	key := fmt.Sprintf("%d:%s", id, typ)
 	m.mu.Lock()
+	if _, ok := m.starting[key]; ok {
+		m.mu.Unlock()
+		return 0, errors.New("该任务已在运行")
+	}
 	for _, v := range m.active {
-		if v.typ == fmt.Sprintf("%d:%s", id, typ) {
+		if v.typ == key {
 			m.mu.Unlock()
 			return 0, errors.New("该任务已在运行")
 		}
 	}
+	m.starting[key] = struct{}{}
 	m.mu.Unlock()
 	dir := filepath.Join(m.dataDir, "logs", "tasks")
 	_ = os.MkdirAll(dir, 0750)
 	path := filepath.Join(dir, fmt.Sprintf("%s-%d-%d.log", typ, id, time.Now().Unix()))
 	runID, e := m.store.AddRun(id, typ, trigger, path)
 	if e != nil {
+		m.mu.Lock()
+		delete(m.starting, key)
+		m.mu.Unlock()
 		return 0, e
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.mu.Lock()
-	m.active[runID] = running{cancel: cancel, typ: fmt.Sprintf("%d:%s", id, typ)}
+	delete(m.starting, key)
+	m.active[runID] = running{cancel: cancel, typ: key}
 	m.mu.Unlock()
 	go m.run(ctx, cancel, runID, id, typ, trigger, path)
 	return runID, nil
@@ -784,6 +802,13 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 		if typ == "chat" {
 			return m.runChat(ctx, a, logger)
 		}
+		if typ == "redeem" {
+			native, nativeErr := m.nativeClient(ctx, a)
+			if nativeErr != nil {
+				return nativeErr
+			}
+			return m.redeem(ctx, a, native, logger)
+		}
 		var c *ctyun.Client
 		c, clientErr := m.client(ctx, a)
 		if clientErr != nil {
@@ -794,8 +819,6 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 			return m.activateDesktopLogin(ctx, a, c, logger)
 		case "pc":
 			return m.runUsage(ctx, a, c, logger)
-		case "redeem":
-			return m.redeem(ctx, a, c, logger)
 		}
 		return nil
 	}
@@ -896,13 +919,20 @@ func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c
 			}
 			l.Printf("登录会话握手完成，已发送桌面登录凭据")
 		}
+		native, nativeErr := m.nativeClient(ctx, a)
+		if nativeErr != nil {
+			l.Printf("原生积分状态登录失败：%v", nativeErr)
+		}
 		for attempt := 0; attempt < 6; attempt++ {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(3 * time.Second):
 			}
-			tasks, queryErr := c.Tasks(ctx)
+			if nativeErr != nil {
+				continue
+			}
+			tasks, queryErr := native.Tasks(ctx)
 			if queryErr != nil {
 				l.Printf("等待平台同步时查询失败：%v", queryErr)
 				continue
@@ -922,7 +952,7 @@ func (m *Manager) activateDesktopLogin(ctx context.Context, a storage.Account, c
 	}
 	return errors.New("没有可激活登录会话的运行中云电脑")
 }
-func (m *Manager) waitUsage(ctx context.Context, accountID int64, c *ctyun.Client, l *log.Logger) error {
+func (m *Manager) waitUsage(ctx context.Context, accountID int64, c *ctyun.NativeClient, l *log.Logger) error {
 	deadline := time.Now().Add(80 * time.Minute)
 	for {
 		tasks, e := c.Tasks(ctx)
@@ -958,7 +988,11 @@ func (m *Manager) waitUsage(ctx context.Context, accountID int64, c *ctyun.Clien
 // disabled, it creates one temporary desktop session and closes it as soon as
 // the platform confirms the daily one-hour task.
 func (m *Manager) runUsage(ctx context.Context, a storage.Account, c *ctyun.Client, l *log.Logger) error {
-	tasks, e := c.Tasks(ctx)
+	native, e := m.nativeClient(ctx, a)
+	if e != nil {
+		return fmt.Errorf("原生积分状态登录：%w", e)
+	}
+	tasks, e := native.Tasks(ctx)
 	if e == nil {
 		if task, ok := normalizeTasks(tasks)["usage"]; ok && task.State == "success" {
 			l.Printf("平台已确认今日时长任务完成，无需重复连接")
@@ -970,7 +1004,7 @@ func (m *Manager) runUsage(ctx context.Context, a storage.Account, c *ctyun.Clie
 	m.mu.RUnlock()
 	if liveSession {
 		l.Printf("复用现有持续保活连接累计使用时长")
-		return m.waitUsage(ctx, a.ID, c, l)
+		return m.waitUsage(ctx, a.ID, native, l)
 	}
 
 	desktops, e := c.ListDesktops(ctx)
@@ -1029,7 +1063,7 @@ func (m *Manager) runUsage(ctx context.Context, a storage.Account, c *ctyun.Clie
 			}
 			return fmt.Errorf("建立临时时长连接：%w", runErr)
 		case <-activated:
-			return m.waitUsage(ctx, a.ID, c, l)
+			return m.waitUsage(ctx, a.ID, native, l)
 		case <-time.After(60 * time.Second):
 			return errors.New("等待临时时长连接激活超时")
 		}
@@ -1064,7 +1098,7 @@ func (m *Manager) RedeemCatalog(ctx context.Context, id int64) ([]ctyun.Reward, 
 	if e != nil {
 		return nil, nil, e
 	}
-	c, e := m.client(ctx, a)
+	c, e := m.nativeClient(ctx, a)
 	if e != nil {
 		return nil, nil, e
 	}
@@ -1072,10 +1106,90 @@ func (m *Manager) RedeemCatalog(ctx context.Context, id int64) ([]ctyun.Reward, 
 	if e != nil {
 		return nil, nil, e
 	}
-	d, e := c.ListDesktops(ctx)
-	return r, d, e
+	d, e := c.Desktops(ctx)
+	if e != nil {
+		return nil, nil, e
+	}
+	available := r[:0]
+	for _, reward := range r {
+		if e := validateRedeemReward(reward, time.Now()); e == nil {
+			available = append(available, reward)
+		}
+	}
+	return available, d, nil
 }
-func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Client, l *log.Logger) error {
+
+func (m *Manager) ValidateRedeemConfig(ctx context.Context, id int64, cfg storage.RedeemConfig) (storage.RedeemConfig, error) {
+	cfg.AccountID = id
+	if !cfg.Enabled {
+		if cfg.MaxTimes < 1 {
+			cfg.MaxTimes = 1
+		}
+		if cfg.IntervalDays < 1 {
+			cfg.IntervalDays = 1
+		}
+		if cfg.ScheduleType == "" {
+			cfg.ScheduleType = "daily"
+		}
+		return cfg, nil
+	}
+	if cfg.MaxTimes < 1 {
+		return cfg, errors.New("单次最多兑换次数必须大于 0")
+	}
+	switch cfg.ScheduleType {
+	case "daily":
+	case "interval":
+		if cfg.IntervalDays < 1 {
+			return cfg, errors.New("兑换间隔天数必须大于 0")
+		}
+	case "monthly":
+		if _, e := monthlyRedeemDays(cfg.MonthlyDays); e != nil {
+			return cfg, e
+		}
+	default:
+		return cfg, errors.New("未知的兑换计划类型")
+	}
+	if cfg.ProductID == "" || cfg.DesktopID == "" {
+		return cfg, errors.New("启用自动兑换前必须选择商品和目标云电脑")
+	}
+	old, e := m.store.Redeem(id)
+	if e != nil {
+		return cfg, e
+	}
+	var pending string
+	e = m.store.DB.QueryRow("SELECT last_attempt_status FROM redeem_states WHERE account_id=?", id).Scan(&pending)
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return cfg, e
+	}
+	if pending == "pending" && (old.ProductID != cfg.ProductID || old.DesktopID != cfg.DesktopID) {
+		return cfg, errors.New("上一笔兑换结果待确认，不能更换兑换目标")
+	}
+	rewards, desktops, e := m.RedeemCatalog(ctx, id)
+	if e != nil {
+		return cfg, fmt.Errorf("读取实时兑换目录：%w", e)
+	}
+	foundReward := false
+	for _, reward := range rewards {
+		if strconv.FormatInt(reward.ProductID, 10) == cfg.ProductID {
+			cfg.ProductName = reward.ProductName
+			cfg.ProductType = reward.ProductType
+			cfg.CostPoints = reward.CostPoints
+			foundReward = true
+			break
+		}
+	}
+	if !foundReward {
+		return cfg, errors.New("选择的兑换商品已下架或当前不可兑换")
+	}
+	for _, desktop := range desktops {
+		if desktop.ID() == cfg.DesktopID {
+			return cfg, nil
+		}
+	}
+	return cfg, errors.New("选择的目标云电脑已不存在或不属于当前账号")
+}
+
+func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.NativeClient, l *log.Logger) error {
 	cfg, e := m.store.Redeem(a.ID)
 	if e != nil {
 		return e
@@ -1084,7 +1198,10 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Client
 		return errors.New("自动兑换未启用")
 	}
 	var state struct{ LastAttemptDate, LastAttemptStatus string }
-	_ = m.store.DB.QueryRow("SELECT last_attempt_date,last_attempt_status FROM redeem_states WHERE account_id=?", a.ID).Scan(&state.LastAttemptDate, &state.LastAttemptStatus)
+	e = m.store.DB.QueryRow("SELECT last_attempt_date,last_attempt_status FROM redeem_states WHERE account_id=?", a.ID).Scan(&state.LastAttemptDate, &state.LastAttemptStatus)
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
 	today := time.Now().Format("2006-01-02")
 	if state.LastAttemptStatus == "pending" {
 		return errors.New("上一笔兑换结果待确认，已停止自动兑换")
@@ -1106,6 +1223,15 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Client
 	if found == nil {
 		return errors.New("配置的兑换商品已下架")
 	}
+	if cfg.ProductType != "" && found.ProductType != cfg.ProductType {
+		return errors.New("商品类型已变化，请重新确认兑换配置")
+	}
+	if cfg.CostPoints > 0 && found.CostPoints != cfg.CostPoints {
+		return fmt.Errorf("商品积分价格已从 %d 变为 %d，请重新确认兑换配置", cfg.CostPoints, found.CostPoints)
+	}
+	if e := validateRedeemReward(*found, time.Now()); e != nil {
+		return e
+	}
 	points, e := c.Points(ctx)
 	if e != nil {
 		return e
@@ -1120,16 +1246,27 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Client
 	if times < 1 {
 		return fmt.Errorf("积分不足：当前 %d，需要 %d", points, found.CostPoints)
 	}
-	desktopID, e := strconv.ParseInt(cfg.DesktopID, 10, 64)
+	desktops, e := c.Desktops(ctx)
 	if e != nil {
-		return errors.New("目标云电脑配置无效")
+		return fmt.Errorf("兑换前验证云电脑：%w", e)
 	}
-	_, e = m.store.DB.Exec(`INSERT INTO redeem_states(account_id,last_attempt_date,last_attempt_status,message,updated_at) VALUES(?,?,'pending','订单提交中',?) ON CONFLICT(account_id) DO UPDATE SET last_attempt_date=excluded.last_attempt_date,last_attempt_status='pending',message='订单提交中',updated_at=excluded.updated_at`, a.ID, today, storage.Now())
+	var desktop *ctyun.Desktop
+	for i := range desktops {
+		if desktops[i].ID() == cfg.DesktopID {
+			desktop = &desktops[i]
+			break
+		}
+	}
+	if desktop == nil {
+		return errors.New("配置的目标云电脑已不存在或不属于当前账号")
+	}
+	pointsSpent := found.CostPoints * times
+	_, e = m.store.DB.Exec(`INSERT INTO redeem_states(account_id,last_attempt_date,last_attempt_status,last_redeem_times,last_points_spent,message,updated_at) VALUES(?,?,'pending',?,?,'订单提交中',?) ON CONFLICT(account_id) DO UPDATE SET last_attempt_date=excluded.last_attempt_date,last_attempt_status='pending',last_redeem_times=excluded.last_redeem_times,last_points_spent=excluded.last_points_spent,message='订单提交中',updated_at=excluded.updated_at`, a.ID, today, times, pointsSpent, storage.Now())
 	if e != nil {
 		return e
 	}
-	l.Printf("兑换前复核：%s，%d 次，预计 %d 积分", found.ProductName, times, found.CostPoints*times)
-	e = c.PlaceOrder(ctx, found.ProductID, found.ProductType, found.CostPoints, times, desktopID)
+	l.Printf("兑换前复核：%s，%d 次，预计 %d 积分", found.ProductName, times, pointsSpent)
+	e = c.PlaceOrder(ctx, *found, times, *desktop)
 	status := "success"
 	msg := "兑换成功"
 	if e != nil {
@@ -1138,8 +1275,8 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Client
 	} else {
 		l.Printf("兑换成功")
 	}
-	_, _ = m.store.DB.Exec(`UPDATE redeem_states SET last_attempt_status=?,last_success_date=CASE WHEN ?='success' THEN ? ELSE last_success_date END,last_redeem_times=?,last_points_spent=?,message=?,updated_at=? WHERE account_id=?`, status, status, today, times, found.CostPoints*times, msg, storage.Now(), a.ID)
-	return e
+	_, stateErr := m.store.DB.Exec(`UPDATE redeem_states SET last_attempt_status=?,last_success_date=CASE WHEN ?='success' THEN ? ELSE last_success_date END,last_redeem_times=?,last_points_spent=?,message=?,updated_at=? WHERE account_id=?`, status, status, today, times, pointsSpent, msg, storage.Now(), a.ID)
+	return errors.Join(e, stateErr)
 }
 func (m *Manager) BeginVerification(ctx context.Context, id int64) (bool, error) {
 	a, e := m.store.Account(id)
@@ -1239,24 +1376,36 @@ func (m *Manager) scheduler() {
 }
 
 func (m *Manager) redeemDue(id int64, cfg storage.RedeemConfig, now time.Time) bool {
-	var last string
-	_ = m.store.DB.QueryRow("SELECT last_attempt_date FROM redeem_states WHERE account_id=?", id).Scan(&last)
+	var lastAttempt, lastSuccess, status string
+	e := m.store.DB.QueryRow("SELECT last_attempt_date,last_success_date,last_attempt_status FROM redeem_states WHERE account_id=?", id).Scan(&lastAttempt, &lastSuccess, &status)
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return false
+	}
+	today := now.Format("2006-01-02")
+	if status == "pending" || lastAttempt == today {
+		return false
+	}
 	switch cfg.ScheduleType {
 	case "monthly":
-		for _, day := range strings.Split(cfg.MonthlyDays, ",") {
-			if strings.TrimSpace(day) == strconv.Itoa(now.Day()) {
+		days, e := monthlyRedeemDays(cfg.MonthlyDays)
+		if e != nil {
+			return false
+		}
+		lastDay := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, now.Location()).Day()
+		for _, day := range days {
+			if day == now.Day() || (day == -1 && now.Day() == lastDay) {
 				return true
 			}
 		}
 		return false
 	case "interval":
-		if last == "" {
+		if lastSuccess == "" {
 			return true
 		}
-		t, e := time.Parse("2006-01-02", last)
-		return e != nil || int(now.Sub(t).Hours()/24) >= cfg.IntervalDays
+		t, e := time.ParseInLocation("2006-01-02", lastSuccess, now.Location())
+		return e == nil && !now.Before(t.AddDate(0, 0, cfg.IntervalDays))
 	default:
-		return last != now.Format("2006-01-02")
+		return lastAttempt != today
 	}
 }
 func (m *Manager) ResolveRedeem(id int64, succeeded bool) error {
@@ -1266,8 +1415,83 @@ func (m *Manager) ResolveRedeem(id int64, succeeded bool) error {
 		status = "success"
 		msg = "已人工确认成功"
 	}
-	_, e := m.store.DB.Exec("UPDATE redeem_states SET last_attempt_status=?,message=?,updated_at=? WHERE account_id=? AND last_attempt_status='pending'", status, msg, storage.Now(), id)
-	return e
+	result, e := m.store.DB.Exec(`UPDATE redeem_states SET last_attempt_status=?,last_success_date=CASE WHEN ?='success' THEN last_attempt_date ELSE last_success_date END,message=?,updated_at=? WHERE account_id=? AND last_attempt_status='pending'`, status, status, msg, storage.Now(), id)
+	if e != nil {
+		return e
+	}
+	affected, e := result.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if affected == 0 {
+		return errors.New("当前没有待确认的兑换订单")
+	}
+	return nil
+}
+
+func validateRedeemReward(reward ctyun.Reward, now time.Time) error {
+	if reward.ProductID <= 0 || strings.TrimSpace(reward.ProductType) == "" || reward.CostPoints <= 0 {
+		return errors.New("商品参数无效")
+	}
+	if reward.Status != 0 && reward.Status != 2 {
+		return fmt.Errorf("商品当前不可兑换（状态 %d）", reward.Status)
+	}
+	checks := []struct {
+		value     string
+		effective bool
+	}{{reward.EffectiveAt, true}, {reward.ExpiresAt, false}}
+	for _, check := range checks {
+		value := strings.TrimSpace(check.value)
+		if value == "" {
+			continue
+		}
+		var parsed time.Time
+		var e error
+		dateOnly := false
+		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
+			parsed, e = time.ParseInLocation(layout, value, now.Location())
+			if e == nil {
+				dateOnly = layout == "2006-01-02"
+				break
+			}
+		}
+		if e != nil {
+			continue
+		}
+		if check.effective && now.Before(parsed) {
+			return errors.New("商品尚未生效")
+		}
+		if !check.effective && dateOnly {
+			parsed = parsed.AddDate(0, 0, 1)
+		}
+		if !check.effective && !now.Before(parsed) {
+			return errors.New("商品已经过期")
+		}
+	}
+	return nil
+}
+
+func monthlyRedeemDays(value string) ([]int, error) {
+	var days []int
+	seen := map[int]bool{}
+	for _, raw := range strings.Split(value, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		day, e := strconv.Atoi(raw)
+		if e != nil || (day != -1 && (day < 1 || day > 31)) {
+			return nil, fmt.Errorf("每月兑换日期 %q 无效", raw)
+		}
+		if !seen[day] {
+			days = append(days, day)
+			seen[day] = true
+		}
+	}
+	if len(days) == 0 {
+		return nil, errors.New("每月兑换日期不能为空")
+	}
+	return days, nil
 }
 func (m *Manager) MarshalStatus() []byte {
 	state, workers := m.KeepaliveStatus()

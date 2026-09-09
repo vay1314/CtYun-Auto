@@ -1,0 +1,86 @@
+name: Build and publish development image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Build and push Docker dev image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Hub configuration
+        id: config
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" ]]; then
+            echo "Repository variable DOCKERHUB_USERNAME is not configured" >&2
+            exit 1
+          fi
+          if [[ -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "Repository secret DOCKERHUB_TOKEN is not configured" >&2
+            exit 1
+          fi
+          echo "image=${DOCKERHUB_USERNAME,,}/ctyun-keeper" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.config.outputs.image }}
+          tags: |
+            type=raw,value=dev
+          labels: |
+            org.opencontainers.image.version=dev-${{ github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push development image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./app/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            APP_VERSION=dev-${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-dev
+          cache-to: type=gha,mode=max,scope=docker-dev
+          provenance: mode=max
+          sbom: true

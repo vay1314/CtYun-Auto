@@ -1,7 +1,6 @@
 package web
 
 import (
-	"context"
 	"fmt"
 	"html"
 	"io"
@@ -728,22 +727,20 @@ func (s *Server) redeem(w http.ResponseWriter, r *http.Request, id int64, parts 
 			return
 		}
 		if len(parts) > 3 && parts[3] == "resolve" {
-			_ = s.manager.ResolveRedeem(id, r.FormValue("succeeded") == "1")
+			if e := s.manager.ResolveRedeem(id, r.FormValue("succeeded") == "1"); e != nil {
+				redirect(w, r, fmt.Sprintf("/accounts/%d/redeem", id), e.Error(), true)
+				return
+			}
 			redirect(w, r, fmt.Sprintf("/accounts/%d/redeem", id), "待确认订单状态已处理", false)
 			return
 		}
 		cfg := storage.RedeemConfig{AccountID: id, Enabled: r.Form.Has("enabled"), ProductID: r.FormValue("product_id"), DesktopID: r.FormValue("desktop_id"), MaxTimes: security.Int(r.FormValue("max_times")), ScheduleType: r.FormValue("schedule_type"), IntervalDays: security.Int(r.FormValue("interval_days")), MonthlyDays: r.FormValue("monthly_days")}
-		if rewards, _, e := s.manager.RedeemCatalog(r.Context(), id); e == nil {
-			for _, p := range rewards {
-				if strconv.FormatInt(p.ProductID, 10) == cfg.ProductID {
-					cfg.ProductName = p.ProductName
-					cfg.ProductType = p.ProductType
-					cfg.CostPoints = p.CostPoints
-					break
-				}
-			}
+		cfg, e := s.manager.ValidateRedeemConfig(r.Context(), id, cfg)
+		if e != nil {
+			redirect(w, r, r.URL.Path, e.Error(), true)
+			return
 		}
-		if e := s.store.SaveRedeem(cfg); e != nil {
+		if e = s.store.SaveRedeem(cfg); e != nil {
 			redirect(w, r, r.URL.Path, e.Error(), true)
 		} else {
 			redirect(w, r, r.URL.Path, "自动兑换配置已保存", false)
@@ -754,7 +751,7 @@ func (s *Server) redeem(w http.ResponseWriter, r *http.Request, id int64, parts 
 	cfg, _ := s.store.Redeem(id)
 	var pending string
 	_ = s.store.DB.QueryRow("SELECT last_attempt_status FROM redeem_states WHERE account_id=?", id).Scan(&pending)
-	rewards, desktops, e := s.manager.RedeemCatalog(context.Background(), id)
+	rewards, desktops, e := s.manager.RedeemCatalog(r.Context(), id)
 	warning := ""
 	if e != nil {
 		warning = `<div class="form-error">无法读取实时目录：` + esc(e.Error()) + `</div>`
@@ -779,7 +776,7 @@ func (s *Server) redeem(w http.ResponseWriter, r *http.Request, id int64, parts 
 	if pending == "pending" {
 		pendingPanel = fmt.Sprintf(`<article class="panel form-panel"><h2>上一笔订单待确认</h2><p>为避免重复扣除积分，自动兑换已暂停。请在平台核对订单后选择结果。</p><div class=form-actions><form method=post action="/accounts/%d/redeem/resolve"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=succeeded value=1><button class=primary>确认已成功</button></form><form method=post action="/accounts/%d/redeem/resolve"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=succeeded value=0><button class=secondary>确认未成功</button></form></div></article>`, id, id)
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>积分奖励</p><h1>%s · 自动兑换</h1></div><div class=form-actions><form method=post action="/accounts/%d/tasks/redeem"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary>立即检查兑换</button></form><a class="secondary button" href=/accounts>返回</a></div></header>%s%s<form class="panel form-panel" method=post><input type=hidden name=csrf_token value="{{CSRF}}"><label class=switch-row><input type=checkbox name=enabled%s><span>启用自动兑换（默认关闭）</span></label><div class=form-grid><label>奖励商品<select name=product_id required>%s</select></label><label>目标云电脑<select name=desktop_id required>%s</select></label><label>单次最多兑换次数<input type=number name=max_times min=1 value="%d"></label><label>计划<select name=schedule_type><option value=daily%s>每天检查</option><option value=interval%s>按间隔天数</option><option value=monthly%s>指定每月日期</option></select></label><label>间隔天数<input type=number name=interval_days min=1 value="%d"></label><label>每月日期<input name=monthly_days value="%s" placeholder="1,15,28"></label></div><p class=muted>提交订单前会重新校验商品、积分和云电脑；不确定结果会进入待人工确认状态，防止重复兑换。</p><button class=primary>保存配置</button></form>`, esc(a.Name), id, warning, pendingPanel, checked(cfg.Enabled), productOptions.String(), desktopOptions.String(), cfg.MaxTimes, selected(cfg.ScheduleType == "daily"), selected(cfg.ScheduleType == "interval"), selected(cfg.ScheduleType == "monthly"), cfg.IntervalDays, esc(cfg.MonthlyDays))
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>积分奖励</p><h1>%s · 自动兑换</h1></div><div class=form-actions><form method=post action="/accounts/%d/tasks/redeem"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=secondary>立即检查兑换</button></form><a class="secondary button" href=/accounts>返回</a></div></header>%s%s<form class="panel form-panel" method=post><input type=hidden name=csrf_token value="{{CSRF}}"><label class=switch-row><input type=checkbox name=enabled%s><span>启用自动兑换（默认关闭）</span></label><div class=form-grid><label>奖励商品<select name=product_id required>%s</select></label><label>目标云电脑<select name=desktop_id required>%s</select></label><label>单次最多兑换次数<input type=number name=max_times min=1 value="%d"></label><label>计划<select name=schedule_type><option value=daily%s>每天检查</option><option value=interval%s>按间隔天数</option><option value=monthly%s>指定每月日期</option></select></label><label>间隔天数<input type=number name=interval_days min=1 value="%d"></label><label>每月日期<input name=monthly_days value="%s" placeholder="1,15,28；-1 表示月末"></label></div><p class=muted>提交订单前会重新校验商品价格、状态、有效期、积分和云电脑归属；不确定结果会进入待人工确认状态，防止重复兑换。</p><button class=primary>保存配置</button></form>`, esc(a.Name), id, warning, pendingPanel, checked(cfg.Enabled), productOptions.String(), desktopOptions.String(), cfg.MaxTimes, selected(cfg.ScheduleType == "daily"), selected(cfg.ScheduleType == "interval"), selected(cfg.ScheduleType == "monthly"), cfg.IntervalDays, esc(cfg.MonthlyDays))
 	s.page(w, r, "自动兑换", content, true)
 }
 

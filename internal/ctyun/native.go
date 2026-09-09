@@ -1,6 +1,7 @@
 package ctyun
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -45,16 +46,18 @@ type NativeProfile struct {
 }
 
 type NativeOptions struct {
-	APIOrigin  string
-	HTTPClient *http.Client
-	Now        func() time.Time
-	Random     io.Reader
+	APIOrigin         string
+	MarketplaceOrigin string
+	HTTPClient        *http.Client
+	Now               func() time.Time
+	Random            io.Reader
 }
 
 type NativeClient struct {
 	username, password, deviceCode string
 	solve                          func(context.Context, []byte) (string, error)
 	apiOrigin                      string
+	marketplaceOrigin              string
 	http                           *http.Client
 	now                            func() time.Time
 	random                         io.Reader
@@ -73,6 +76,10 @@ func NewNativeClientWithOptions(username, password, deviceCode string, solve fun
 	if origin == "" {
 		origin = PCOrigin
 	}
+	marketplaceOrigin := strings.TrimRight(options.MarketplaceOrigin, "/")
+	if marketplaceOrigin == "" {
+		marketplaceOrigin = "https://desk.ctyun.cn"
+	}
 	httpClient := options.HTTPClient
 	if httpClient == nil {
 		jar, _ := cookiejar.New(nil)
@@ -86,7 +93,7 @@ func NewNativeClientWithOptions(username, password, deviceCode string, solve fun
 	if randomSource == nil {
 		randomSource = rand.Reader
 	}
-	return &NativeClient{username: username, password: password, deviceCode: deviceCode, solve: solve, apiOrigin: origin, http: httpClient, now: now, random: randomSource}
+	return &NativeClient{username: username, password: password, deviceCode: deviceCode, solve: solve, apiOrigin: origin, marketplaceOrigin: marketplaceOrigin, http: httpClient, now: now, random: randomSource}
 }
 
 func (c *NativeClient) UseProfile(profile NativeProfile) {
@@ -365,6 +372,109 @@ func (c *NativeClient) GetTicket(ctx context.Context, service string) (string, e
 		return "", errors.New("原生 getTicket 未返回 ticket")
 	}
 	return out.Ticket, nil
+}
+
+func (c *NativeClient) marketplace(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	headers, err := c.publicHeaders()
+	if err != nil {
+		return err
+	}
+	headers.Set("Cache-Control", "no-cache")
+	headers.Set("Pragma", "no-cache")
+	headers.Set("Content-Type", "application/json")
+	headers.Set("From", "App-web")
+	headers.Set("x-lang", "zh-CN")
+	endpoint := c.marketplaceOrigin + path
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
+	var payload io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("编码原生积分商城请求：%w", err)
+		}
+		payload = bytes.NewReader(raw)
+	}
+	if err := c.do(ctx, method, endpoint, payload, headers, out); err != nil {
+		return fmt.Errorf("原生积分商城 %s：%w", path, err)
+	}
+	return nil
+}
+
+func (c *NativeClient) Tasks(ctx context.Context) ([]Task, error) {
+	var out []Task
+	err := c.marketplace(ctx, http.MethodGet, "/selforder/api/marketing/userPoints/getTaskList", nil, nil, &out)
+	return out, err
+}
+
+func (c *NativeClient) Points(ctx context.Context) (int, error) {
+	var values []pointsBalance
+	if err := c.marketplace(ctx, http.MethodGet, "/selforder/api/marketing/userPoints/getUserPoints", nil, nil, &values); err != nil {
+		return 0, err
+	}
+	return mainPointsBalance(values), nil
+}
+
+func (c *NativeClient) Rewards(ctx context.Context) ([]Reward, error) {
+	var malls []struct {
+		Series []struct {
+			Description string `json:"description"`
+			SKU         []struct {
+				ProductID   int64  `json:"prodId"`
+				ProductName string `json:"prodName"`
+				ProductType string `json:"prodType"`
+				Cost        int    `json:"costPoints"`
+				PointType   int    `json:"pointType"`
+				Status      int    `json:"prodStatus"`
+				Description string `json:"description"`
+				EffectiveAt any    `json:"effDate"`
+				ExpireDate  any    `json:"expireDate"`
+			} `json:"sku"`
+		} `json:"series"`
+	}
+	if err := c.marketplace(ctx, http.MethodGet, "/selforder/api/selforder/prod/get", url.Values{"prodId": {"17000000"}, "prodCode": {"POINTS"}}, nil, &malls); err != nil {
+		return nil, err
+	}
+	var out []Reward
+	for _, mall := range malls {
+		for _, series := range mall.Series {
+			for _, sku := range series.SKU {
+				description := sku.Description
+				if description == "" {
+					description = series.Description
+				}
+				out = append(out, Reward{
+					ProductID: sku.ProductID, ProductName: sku.ProductName, ProductType: sku.ProductType,
+					Description: description, CostPoints: sku.Cost, PointType: sku.PointType, Status: sku.Status,
+					EffectiveAt: rewardTimeString(sku.EffectiveAt), ExpiresAt: rewardTimeString(sku.ExpireDate),
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func (c *NativeClient) Desktops(ctx context.Context) ([]Desktop, error) {
+	var page struct {
+		DesktopList           []Desktop `json:"desktopList"`
+		DesktopPoolList       []Desktop `json:"desktopPoolList"`
+		PreemptionDesktopList []Desktop `json:"preemptionDesktopList"`
+	}
+	if err := c.marketplace(ctx, http.MethodPost, "/selforder/api/desktop/client/pageDesktop", nil, map[string]any{
+		"getCnt": 30, "desktopTypes": []string{"1", "2001", "2002", "2003"}, "sortType": "createTimeV1",
+	}, &page); err != nil {
+		return nil, err
+	}
+	out := make([]Desktop, 0, len(page.DesktopList)+len(page.DesktopPoolList)+len(page.PreemptionDesktopList))
+	out = append(out, page.DesktopList...)
+	out = append(out, page.DesktopPoolList...)
+	out = append(out, page.PreemptionDesktopList...)
+	return out, nil
+}
+
+func (c *NativeClient) PlaceOrder(ctx context.Context, reward Reward, times int, desktop Desktop) error {
+	return c.marketplace(ctx, http.MethodPost, "/selforder/api/selforder/paas/placeOrder", nil, buildOrderBody(reward, times, desktop), nil)
 }
 
 func nativeSHA(value string) string {

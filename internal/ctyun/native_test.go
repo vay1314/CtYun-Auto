@@ -111,6 +111,88 @@ func TestNativeLoginFetchesCaptchaOnlyWhenRequired(t *testing.T) {
 	}
 }
 
+func TestNativeMarketplaceUsesNativeIdentityForWholeFlow(t *testing.T) {
+	fixedNow := time.UnixMilli(1700000005000)
+	orderCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertNativeBaseHeaders(t, r)
+		requestID, timestamp := r.Header.Get("CTG-REQUESTID"), r.Header.Get("CTG-TIMESTAMP")
+		source := NativeDeviceType + requestID + "456" + timestamp + "123" + NativeVersion + "secret"
+		if r.Header.Get("CTG-SIGNATURESTR") != strings.ToUpper(nativeSHA(source)) ||
+			r.Header.Get("CTG-COMMON-DATA") != "common" ||
+			r.Header.Get("From") != "App-web" || r.Header.Get("x-lang") != "zh-CN" {
+			t.Fatalf("native marketplace headers = %v", r.Header)
+		}
+		switch r.URL.Path {
+		case "/selforder/api/marketing/userPoints/getTaskList":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []map[string]any{{"taskDefId": 1002, "taskDefName": "登录AI云电脑", "status": 2}}})
+		case "/selforder/api/marketing/userPoints/getUserPoints":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []map[string]any{{"pointType": 1, "points": 100, "willOutDate": true}, {"pointType": 1, "points": 900}}})
+		case "/selforder/api/selforder/prod/get":
+			if r.URL.Query().Get("prodId") != "17000000" || r.URL.Query().Get("prodCode") != "POINTS" {
+				t.Fatalf("reward query = %v", r.URL.Query())
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []map[string]any{{"series": []map[string]any{{"sku": []map[string]any{{"prodId": 99, "prodName": "升配包", "prodType": "pointstplupgrade", "costPoints": 300, "prodStatus": 2}}}}}}})
+		case "/selforder/api/desktop/client/pageDesktop":
+			if r.Method != http.MethodPost {
+				t.Fatalf("desktop method = %s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"desktopList": []map[string]any{{"desktopId": "42", "desktopName": "主机", "prodInstId": "instance-42"}}}})
+		case "/selforder/api/selforder/paas/placeOrder":
+			orderCalls++
+			if r.Method != http.MethodPost {
+				t.Fatalf("order method = %s", r.Method)
+			}
+			var body struct {
+				BusinessChannel string `json:"busiChannel"`
+				SKU             []struct {
+					Attributes []map[string]any `json:"attrs"`
+				} `json:"sku"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.BusinessChannel != "010" || len(body.SKU) != 2 ||
+				body.SKU[0].Attributes[0]["attrKey"] != "prodInstId" ||
+				body.SKU[0].Attributes[0]["attrVal"] != "instance-42" {
+				t.Fatalf("native order body = %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"ok": true}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewNativeClientWithOptions("user", "password", "device-code", nil, NativeOptions{
+		APIOrigin: server.URL, MarketplaceOrigin: server.URL, HTTPClient: server.Client(),
+		Now: func() time.Time { return fixedNow }, Random: strings.NewReader(strings.Repeat("c", 2048)),
+	})
+	client.UseProfile(NativeProfile{UserID: 123, UserEID: "eid", TenantID: 456, SecretKey: "secret", CommonLoginReqHeader: "common"})
+	tasks, err := client.Tasks(context.Background())
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Tasks() = %#v, %v", tasks, err)
+	}
+	points, err := client.Points(context.Background())
+	if err != nil || points != 900 {
+		t.Fatalf("Points() = %d, %v", points, err)
+	}
+	rewards, err := client.Rewards(context.Background())
+	if err != nil || len(rewards) != 1 {
+		t.Fatalf("Rewards() = %#v, %v", rewards, err)
+	}
+	desktops, err := client.Desktops(context.Background())
+	if err != nil || len(desktops) != 1 {
+		t.Fatalf("Desktops() = %#v, %v", desktops, err)
+	}
+	if err = client.PlaceOrder(context.Background(), rewards[0], 2, desktops[0]); err != nil {
+		t.Fatal(err)
+	}
+	if orderCalls != 1 {
+		t.Fatalf("order calls = %d", orderCalls)
+	}
+}
+
 func assertNativeBaseHeaders(t *testing.T, r *http.Request) {
 	t.Helper()
 	want := map[string]string{"CTG-DEVICECODE": "device-code", "CTG-DEVICETYPE": NativeDeviceType, "CTG-VERSION": NativeVersion, "CTG-APPMODEL": NativeAppModel, "CTG-APPCHANNEL": NativeAppChannel, "CTG-DEVICE-MODEL": NativeDeviceModel}

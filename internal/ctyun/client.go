@@ -41,6 +41,7 @@ type Desktop struct {
 	ObjectName    string `json:"objName"`
 	DesktopID     string `json:"desktopId"`
 	DesktopName   string `json:"desktopName"`
+	ProdInstID    string `json:"prodInstId"`
 	PoolID        string `json:"poolId"`
 	PoolName      string `json:"poolName"`
 	UseStatus     string `json:"useStatus"`
@@ -111,6 +112,14 @@ type Reward struct {
 	ProductID                             int64
 	ProductName, ProductType, Description string
 	CostPoints                            int
+	PointType, Status                     int
+	EffectiveAt, ExpiresAt                string
+}
+type pointsBalance struct {
+	PointType     int    `json:"pointType"`
+	PointTypeName string `json:"pointTypeName"`
+	Points        int    `json:"points"`
+	WillOutDate   bool   `json:"willOutDate"`
 }
 type APIError struct {
 	Code    any
@@ -480,32 +489,46 @@ func (c *Client) Tasks(ctx context.Context) ([]Task, error) {
 	return v, e
 }
 func (c *Client) Points(ctx context.Context) (int, error) {
-	var values []struct {
-		PointType     int    `json:"pointType"`
-		PointTypeName string `json:"pointTypeName"`
-		Points        int    `json:"points"`
-	}
+	var values []pointsBalance
 	e := c.points(ctx, "GET", "/marketing/userPoints/getUserPoints", nil, nil, &values)
 	if e != nil {
 		return 0, e
 	}
+	return mainPointsBalance(values), nil
+}
+
+func mainPointsBalance(values []pointsBalance) int {
+	mainPoints, fallback := 0, 0
+	hasMain := false
 	for _, v := range values {
 		if v.PointType == 1 || v.PointTypeName == "通用积分" {
-			return v.Points, nil
+			if v.Points > fallback {
+				fallback = v.Points
+			}
+			if !v.WillOutDate && (!hasMain || v.Points > mainPoints) {
+				mainPoints = v.Points
+				hasMain = true
+			}
 		}
 	}
-	return 0, nil
+	if hasMain {
+		return mainPoints
+	}
+	return fallback
 }
 func (c *Client) Rewards(ctx context.Context) ([]Reward, error) {
 	var malls []struct {
 		Series []struct {
-			ExpireDate any `json:"expireDate"`
-			SKU        []struct {
+			Description string `json:"description"`
+			SKU         []struct {
 				ProductID   int64  `json:"prodId"`
 				ProductName string `json:"prodName"`
 				ProductType string `json:"prodType"`
 				Cost        int    `json:"costPoints"`
+				PointType   int    `json:"pointType"`
+				Status      int    `json:"prodStatus"`
 				Description string `json:"description"`
+				EffectiveAt any    `json:"effDate"`
 				ExpireDate  any    `json:"expireDate"`
 			} `json:"sku"`
 		} `json:"series"`
@@ -518,19 +541,64 @@ func (c *Client) Rewards(ctx context.Context) ([]Reward, error) {
 	for _, m := range malls {
 		for _, s := range m.Series {
 			for _, p := range s.SKU {
-				if p.ExpireDate == nil {
-					out = append(out, Reward{p.ProductID, p.ProductName, p.ProductType, p.Description, p.Cost})
+				description := p.Description
+				if description == "" {
+					description = s.Description
 				}
+				out = append(out, Reward{
+					ProductID: p.ProductID, ProductName: p.ProductName, ProductType: p.ProductType,
+					Description: description, CostPoints: p.Cost, PointType: p.PointType, Status: p.Status,
+					EffectiveAt: rewardTimeString(p.EffectiveAt), ExpiresAt: rewardTimeString(p.ExpireDate),
+				})
 			}
 		}
 	}
 	return out, nil
 }
-func (c *Client) PlaceOrder(ctx context.Context, productID int64, productType string, cost, times int, desktopID int64) error {
-	attrs := []map[string]any{{"attrKey": "desktopId", "attrVal": desktopID}}
-	body := map[string]any{"busiChannel": "1", "orderType": 1, "pointType": 1, "points": cost * times, "sku": []map[string]any{{"execSort": 1, "prodId": productID, "prodType": productType, "attrs": attrs, "orderNum": times}}}
+
+func rewardTimeString(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func (c *Client) PlaceOrder(ctx context.Context, reward Reward, times int, desktop Desktop) error {
+	body := buildOrderBody(reward, times, desktop)
 	var out any
 	return c.points(ctx, "POST", "/selforder/paas/placeOrder", nil, body, &out)
+}
+
+func buildOrderBody(reward Reward, times int, desktop Desktop) map[string]any {
+	pointType := reward.PointType
+	if pointType == 0 {
+		pointType = 1
+		if reward.ProductID >= 18000000 {
+			pointType = 500
+		}
+	}
+	attrs := []map[string]any{}
+	if reward.ProductType == "pointstplupgrade" {
+		key, value := "bindDesktopId", any(desktop.ID())
+		if desktop.ProdInstID != "" {
+			key, value = "prodInstId", desktop.ProdInstID
+		}
+		attrs = append(attrs, map[string]any{"attrKey": key, "attrVal": value})
+	}
+	skus := make([]map[string]any, 0, times)
+	for i := 0; i < times; i++ {
+		skus = append(skus, map[string]any{
+			"execSort": i + 1, "prodId": reward.ProductID, "prodType": reward.ProductType, "attrs": attrs,
+		})
+	}
+	body := map[string]any{
+		"busiChannel": "010", "orderType": 1, "pointType": pointType,
+		"points": reward.CostPoints * times, "sku": skus,
+	}
+	return body
 }
 func (c *Client) SendSMS(ctx context.Context) error {
 	h, _ := c.signed(PCVersion, false)
