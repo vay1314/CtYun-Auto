@@ -796,7 +796,12 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 	f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
 	logger := log.New(f, "", log.LstdFlags)
 	defer f.Close()
-	logger.Printf("开始%s任务", map[string]string{"login": "登录 AI 云电脑", "chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ])
+	taskName := map[string]string{"login": "登录 AI 云电脑", "chat": "AI 对话", "pc": "挂机", "redeem": "自动兑换"}[typ]
+	automaticRedeem := typ == "redeem" && (trigger == "schedule" || trigger == "after_pc")
+	if typ == "redeem" && !automaticRedeem {
+		taskName = "立即兑换"
+	}
+	logger.Printf("开始%s任务", taskName)
 	a, e := m.store.Account(accountID)
 	execute := func() error {
 		if typ == "chat" {
@@ -807,7 +812,7 @@ func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, acc
 			if nativeErr != nil {
 				return nativeErr
 			}
-			return m.redeem(ctx, a, native, logger)
+			return m.redeem(ctx, a, native, logger, automaticRedeem)
 		}
 		var c *ctyun.Client
 		c, clientErr := m.client(ctx, a)
@@ -1152,6 +1157,21 @@ func (m *Manager) ValidateRedeemConfig(ctx context.Context, id int64, cfg storag
 	if cfg.ProductID == "" || cfg.DesktopID == "" {
 		return cfg, errors.New("启用自动兑换前必须选择商品和目标云电脑")
 	}
+	return m.validateRedeemTarget(ctx, id, cfg)
+}
+
+func (m *Manager) ValidateImmediateRedeem(ctx context.Context, id int64, cfg storage.RedeemConfig) (storage.RedeemConfig, error) {
+	cfg.AccountID = id
+	if cfg.MaxTimes < 1 {
+		return cfg, errors.New("单次最多兑换次数必须大于 0")
+	}
+	if cfg.ProductID == "" || cfg.DesktopID == "" {
+		return cfg, errors.New("立即兑换前必须选择商品和目标云电脑")
+	}
+	return m.validateRedeemTarget(ctx, id, cfg)
+}
+
+func (m *Manager) validateRedeemTarget(ctx context.Context, id int64, cfg storage.RedeemConfig) (storage.RedeemConfig, error) {
 	old, e := m.store.Redeem(id)
 	if e != nil {
 		return cfg, e
@@ -1189,12 +1209,12 @@ func (m *Manager) ValidateRedeemConfig(ctx context.Context, id int64, cfg storag
 	return cfg, errors.New("选择的目标云电脑已不存在或不属于当前账号")
 }
 
-func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.NativeClient, l *log.Logger) error {
+func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.NativeClient, l *log.Logger, automatic bool) error {
 	cfg, e := m.store.Redeem(a.ID)
 	if e != nil {
 		return e
 	}
-	if !cfg.Enabled {
+	if automatic && !cfg.Enabled {
 		return errors.New("自动兑换未启用")
 	}
 	var state struct{ LastAttemptDate, LastAttemptStatus string }
@@ -1206,7 +1226,7 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Native
 	if state.LastAttemptStatus == "pending" {
 		return errors.New("上一笔兑换结果待确认，已停止自动兑换")
 	}
-	if state.LastAttemptDate == today {
+	if automatic && state.LastAttemptDate == today {
 		return errors.New("今日已执行过兑换检查")
 	}
 	products, e := c.Rewards(ctx)

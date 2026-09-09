@@ -136,4 +136,5 @@ go build ./cmd/ctyun-keeper
 - [leleji/CtYun](https://github.com/leleji/CtYun)
 - [VanceHud/CtYun](https://github.com/VanceHud/CtYun)
 - [bytehola/ctyun-auto](https://github.com/bytehola/ctyun-auto)
+- [uvwt/CtyunHelper](https://github.com/uvwt/CtyunHelper)
 - [sml2h3/ddddocr](https://github.com/sml2h3/ddddocr)
