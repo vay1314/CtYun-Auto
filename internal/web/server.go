@@ -64,6 +64,7 @@ func (s *Server) routes(staticDir string) {
 	s.mux.HandleFunc("/logs", s.logs)
 	s.mux.HandleFunc("/logs/", s.logStream)
 	s.mux.HandleFunc("/ctyun/restart", s.restart)
+	s.mux.HandleFunc("/settings/auth", s.authSettings)
 	s.mux.HandleFunc("/settings/password", s.password)
 	s.mux.HandleFunc("/settings/logs/clear", s.clearAllLogs)
 	s.mux.HandleFunc("/settings/logs", s.logSettings)
@@ -96,9 +97,19 @@ func (s *Server) checkCSRF(r *http.Request) bool {
 	return r.FormValue("csrf_token") == expected || r.Header.Get("X-CSRF-Token") == expected
 }
 func (s *Server) authed(r *http.Request) bool {
+	if !s.passwordAuthEnabled() {
+		hash, _ := s.store.Setting("admin_password_hash")
+		return hash != ""
+	}
 	c, e := r.Cookie("ctyun_session")
 	return e == nil && security.VerifyCookie(s.sessionKey, c.Value) && strings.HasPrefix(c.Value, "authenticated.")
 }
+
+func (s *Server) passwordAuthEnabled() bool {
+	value, _ := s.store.Setting("admin_auth_enabled")
+	return value != "false"
+}
+
 func (s *Server) guard(w http.ResponseWriter, r *http.Request) bool {
 	hash, _ := s.store.Setting("admin_password_hash")
 	if hash == "" {
@@ -248,9 +259,13 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, title, content str
 	mainClass := "auth-shell"
 	if auth {
 		mainClass = "main-shell"
-		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>CtYunKeeper</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form></div></header><button class="sidebar-backdrop" type="button"></button>`
+		logoutAction := ""
+		if s.passwordAuthEnabled() {
+			logoutAction = `<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form>`
+		}
+		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>CtYunKeeper</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form>` + logoutAction + `</div></header><button class="sidebar-backdrop" type="button"></button>`
 	}
-	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=csrf-token content='%s'><title>%s · CtYunKeeper</title><link rel=stylesheet href='/static/app.css?v=%s-ui5'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s-ui5' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
+	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=csrf-token content='%s'><title>%s · CtYunKeeper</title><link rel=stylesheet href='/static/app.css?v=%s-ui6'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s-ui6' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
 }
 func redirect(w http.ResponseWriter, r *http.Request, path, msg string, isErr bool) {
 	key := "notice"
@@ -267,7 +282,11 @@ func redirect(w http.ResponseWriter, r *http.Request, path, msg string, isErr bo
 func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	hash, _ := s.store.Setting("admin_password_hash")
 	if hash != "" {
-		http.Redirect(w, r, "/login", 303)
+		if s.passwordAuthEnabled() {
+			http.Redirect(w, r, "/login", 303)
+		} else {
+			http.Redirect(w, r, "/", 303)
+		}
 		return
 	}
 	if r.Method == "POST" {
@@ -289,6 +308,10 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	s.page(w, r, "初始化", `<section class="auth-card"><p class="eyebrow">首次运行</p><h1>设置管理密码</h1><form method=post><input type=hidden name=csrf_token value="{{CSRF}}"><label>密码<input type=password name=password minlength=8 required></label><label>确认密码<input type=password name=confirmation minlength=8 required></label><button class=primary>开始使用</button></form></section>`, false)
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.passwordAuthEnabled() {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	if r.Method == "POST" {
 		_ = r.ParseForm()
 		if !s.checkCSRF(r) {
@@ -1075,8 +1098,46 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>系统设置</h1><p class=page-subtitle>管理访问安全、运行环境与日志存储策略。</p></div></header><section class=settings-grid><form method=post action=/settings/password class="panel form-panel settings-card password-settings-card"><input type=hidden name=csrf_token value="{{CSRF}}"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">account_circle</span><div><h2>访问安全</h2><small>更新管理面板的访问密码</small></div></div><div class=settings-fields><label>当前密码<div class=password-field><input name=current_password type=password required>%s</div></label><label>新密码<div class=password-field><input name=password type=password minlength=8 required>%s</div></label><label>确认新密码<div class=password-field><input name=confirmation type=password minlength=8 required>%s</div></label></div><p class=settings-hint>新密码至少需要 8 位字符</p><button class="primary settings-primary-action">更新密码</button></form><article class="panel info-panel settings-card deployment-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">deployed_code</span><div><h2>部署信息</h2><small>CtYunKeeper 当前运行环境</small></div></div><dl class=deployment-facts><div><dt>服务端口</dt><dd>9845</dd></div><div><dt>当前版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go · Alpine · 单进程</dd></div></dl></article><article class="panel form-panel settings-card log-settings-panel"><div class="settings-card-head log-settings-head"><span class="panel-icon neutral material-symbols-rounded">history</span><div><h2>日志管理</h2><small>设置应用日志的保留与清理方式</small></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><img src=/static/delete-forever.svg alt=""><span>清空全部日志</span></button></form></div><form class=retention-form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<div class=number-field><input name=retention_days type=number min=1 max=3650 value="%d" required><span>天</span></div></label><button class=primary>保存日志设置</button><p class=retention-note>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p></form></article></section>`, passwordToggle(), passwordToggle(), passwordToggle(), esc(s.version), s.manager.LogRetentionDays())
+	authEnabled := s.passwordAuthEnabled()
+	authTone := "success"
+	authLabel := "密码登录已启用"
+	authHint := "访问管理面板时需要输入管理密码。"
+	authIcon := "lock"
+	if !authEnabled {
+		authTone = "warning"
+		authLabel = "密码登录已关闭"
+		authHint = "任何能访问当前地址的设备都可以直接操作面板，仅建议在可信局域网使用。"
+		authIcon = "lock_open"
+	}
+	securityCard := fmt.Sprintf(`<article class="panel form-panel settings-card password-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">%s</span><div><h2>访问安全</h2><small>管理面板登录方式与访问密码</small></div><span class="pill %s settings-auth-status">%s</span></div><form method=post action=/settings/auth class=settings-section><input type=hidden name=csrf_token value="{{CSRF}}"><label>访问方式<select name=auth_enabled><option value=true%s>需要管理密码</option><option value=false%s>局域网免登录</option></select></label><label>当前管理密码<div class=password-field><input name=current_password type=password required autocomplete=current-password>%s</div></label><p class="settings-hint %s">%s</p><button class=primary>保存访问设置</button></form><form method=post action=/settings/password class=settings-section><input type=hidden name=csrf_token value="{{CSRF}}"><h3>修改管理密码</h3><div class=settings-fields><label>当前密码<div class=password-field><input name=current_password type=password required autocomplete=current-password>%s</div></label><label>新密码<div class=password-field><input name=password type=password minlength=8 required autocomplete=new-password>%s</div></label><label>确认新密码<div class=password-field><input name=confirmation type=password minlength=8 required autocomplete=new-password>%s</div></label></div><p class=settings-hint>新密码至少需要 8 位字符</p><button class=primary>更新密码</button></form></article>`, authIcon, authTone, authLabel, selected(authEnabled), selected(!authEnabled), passwordToggle(), map[bool]string{true: "", false: "warning-text"}[authEnabled], esc(authHint), passwordToggle(), passwordToggle(), passwordToggle())
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>系统设置</h1><p class=page-subtitle>管理访问安全、运行环境与日志存储策略。</p></div></header><section class=settings-grid>%s<article class="panel info-panel settings-card deployment-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">deployed_code</span><div><h2>部署信息</h2><small>CtYunKeeper 当前运行环境</small></div></div><dl class=deployment-facts><div><dt>服务端口</dt><dd>9845</dd></div><div><dt>当前版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go · Alpine · 单进程</dd></div></dl></article><article class="panel form-panel settings-card log-settings-panel"><div class="settings-card-head log-settings-head"><span class="panel-icon neutral material-symbols-rounded">history</span><div><h2>日志管理</h2><small>设置应用日志的保留与清理方式</small></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><img src=/static/delete-forever.svg alt=""><span>清空全部日志</span></button></form></div><form class=retention-form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<div class=number-field><input name=retention_days type=number min=1 max=3650 value="%d" required><span>天</span></div></label><button class=primary>保存日志设置</button><p class=retention-note>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p></form></article></section>`, securityCard, esc(s.version), s.manager.LogRetentionDays())
 	s.page(w, r, "设置", content, true)
+}
+
+func (s *Server) authSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	hash, _ := s.store.Setting("admin_password_hash")
+	if !security.VerifyPassword(hash, r.FormValue("current_password")) {
+		redirect(w, r, "/settings", "当前管理密码不正确", true)
+		return
+	}
+	enabled := r.FormValue("auth_enabled") == "true"
+	if err := s.store.SetSetting("admin_auth_enabled", strconv.FormatBool(enabled)); err != nil {
+		redirect(w, r, "/settings", "保存访问设置失败："+err.Error(), true)
+		return
+	}
+	if enabled {
+		s.cookie(w, "ctyun_session", security.SignCookie(s.sessionKey, "authenticated"), true)
+		redirect(w, r, "/settings", "密码登录已启用", false)
+		return
+	}
+	redirect(w, r, "/settings", "密码登录已关闭，请仅在可信局域网中使用", false)
 }
 func (s *Server) logSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) || r.Method != http.MethodPost {

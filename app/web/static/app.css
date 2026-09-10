@@ -291,6 +291,12 @@ pre { height: 58vh; margin: 0; padding: 18px; overflow: auto; border: 1px solid 
 .settings-card { max-width: none; min-width: 0; padding: 30px; }
 .password-settings-card, .deployment-settings-card { min-height: 500px; }
 .password-settings-card { display: flex; flex-direction: column; }
+.settings-auth-status { margin-left: auto; white-space: nowrap; }
+.settings-section { display: grid; gap: 15px; }
+.settings-section + .settings-section { margin-top: 26px; padding-top: 26px; border-top: 1px solid var(--line); }
+.settings-section h3 { margin: 0; font-size: 1rem; }
+.settings-section > button { justify-self: start; }
+.warning-text { color: #b66f2b; }
 .log-settings-panel { grid-column: 1 / -1; }
 .settings-card-head { display: flex; align-items: center; gap: 15px; padding-bottom: 24px; }
 .settings-card-head .panel-icon { flex: 0 0 52px; width: 52px; height: 52px; border-radius: 14px; font-size: 25px; }

@@ -1,9 +1,15 @@
 package web
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/vay1314/CtYun-Keeper/internal/security"
 	"github.com/vay1314/CtYun-Keeper/internal/storage"
 )
 
@@ -35,6 +41,66 @@ func TestValidateKeepaliveSettings(t *testing.T) {
 		if err := validateKeepaliveSettings(account); err == nil {
 			t.Fatalf("invalid keepalive settings were accepted: %#v", account)
 		}
+	}
+}
+
+func TestPasswordAuthenticationCanBeDisabled(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	server := &Server{store: store, sessionKey: []byte("test-session-key")}
+	request := httptest.NewRequest("GET", "/", nil)
+	if !server.passwordAuthEnabled() {
+		t.Fatal("password authentication must default to enabled")
+	}
+	if server.authed(request) {
+		t.Fatal("request without a session must not be authenticated by default")
+	}
+	if err = store.SetSetting("admin_auth_enabled", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.SetSetting("admin_password_hash", "configured"); err != nil {
+		t.Fatal(err)
+	}
+	if server.passwordAuthEnabled() {
+		t.Fatal("password authentication setting was not disabled")
+	}
+	if !server.authed(request) {
+		t.Fatal("LAN access should be authorized while password authentication is disabled")
+	}
+
+	recorder := httptest.NewRecorder()
+	server.login(recorder, request)
+	if recorder.Code != 303 || recorder.Header().Get("Location") != "/" {
+		t.Fatalf("disabled login redirect = %d %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
+
+func TestAuthSettingsRequiresPasswordAndDisablesLogin(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err = store.SetSetting("admin_password_hash", security.HashPassword("password1")); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("test-session-key")
+	server := &Server{store: store, sessionKey: key}
+	form := url.Values{"csrf_token": {"csrf-value"}, "current_password": {"password1"}, "auth_enabled": {"false"}}
+	request := httptest.NewRequest(http.MethodPost, "/settings/auth", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(&http.Cookie{Name: "ctyun_session", Value: security.SignCookie(key, "authenticated")})
+	request.AddCookie(&http.Cookie{Name: "ctyun_csrf", Value: security.SignCookie(key, "csrf-value")})
+	recorder := httptest.NewRecorder()
+	server.authSettings(recorder, request)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("auth settings response = %d", recorder.Code)
+	}
+	if server.passwordAuthEnabled() {
+		t.Fatal("password authentication remained enabled")
 	}
 }
 
