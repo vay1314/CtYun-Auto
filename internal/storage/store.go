@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -12,10 +14,84 @@ import (
 
 type Store struct{ DB *sql.DB }
 type Account struct {
-	ID                                                                                       int64
-	Name, Username, PasswordEncrypted, DeviceCode, LoginCron, ChatCron, PCCron, DeviceStatus string
-	Enabled, KeepaliveEnabled, LoginEnabled, ChatEnabled, PCEnabled                          bool
+	ID                                                                                                            int64
+	Name, Username, PasswordEncrypted, DeviceCode, KeepaliveMode, KeepaliveStart, KeepaliveEnd, KeepaliveWeekdays string
+	LoginCron, ChatCron, PCCron, DeviceStatus                                                                     string
+	Enabled, KeepaliveEnabled, LoginEnabled, ChatEnabled, PCEnabled                                               bool
 }
+
+const (
+	KeepaliveOff       = "off"
+	KeepaliveAlways    = "always"
+	KeepaliveScheduled = "scheduled"
+)
+
+func (a Account) EffectiveKeepaliveMode() string {
+	if !a.KeepaliveEnabled {
+		return KeepaliveOff
+	}
+	switch a.KeepaliveMode {
+	case KeepaliveScheduled:
+		return KeepaliveScheduled
+	case KeepaliveOff:
+		return KeepaliveOff
+	default:
+		return KeepaliveAlways
+	}
+}
+
+func (a Account) KeepaliveActiveAt(now time.Time) bool {
+	if !a.Enabled || a.EffectiveKeepaliveMode() == KeepaliveOff {
+		return false
+	}
+	if a.EffectiveKeepaliveMode() == KeepaliveAlways {
+		return true
+	}
+	start, startOK := clockMinute(a.KeepaliveStart)
+	end, endOK := clockMinute(a.KeepaliveEnd)
+	if !startOK || !endOK || start == end {
+		return false
+	}
+	minute := now.Hour()*60 + now.Minute()
+	weekday := isoWeekday(now.Weekday())
+	if start < end {
+		return keepaliveWeekdaySelected(a.KeepaliveWeekdays, weekday) && minute >= start && minute < end
+	}
+	if minute >= start {
+		return keepaliveWeekdaySelected(a.KeepaliveWeekdays, weekday)
+	}
+	previous := weekday - 1
+	if previous == 0 {
+		previous = 7
+	}
+	return minute < end && keepaliveWeekdaySelected(a.KeepaliveWeekdays, previous)
+}
+
+func clockMinute(value string) (int, bool) {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	return parsed.Hour()*60 + parsed.Minute(), err == nil
+}
+
+func isoWeekday(day time.Weekday) int {
+	if day == time.Sunday {
+		return 7
+	}
+	return int(day)
+}
+
+func keepaliveWeekdaySelected(value string, day int) bool {
+	if strings.TrimSpace(value) == "" {
+		value = "1,2,3,4,5,6,7"
+	}
+	needle := strconv.Itoa(day)
+	for _, item := range strings.Split(value, ",") {
+		if strings.TrimSpace(item) == needle {
+			return true
+		}
+	}
+	return false
+}
+
 type Run struct {
 	ID, AccountID                                                                   int64
 	AccountName, TaskType, Trigger, Status, StartedAt, FinishedAt, LogPath, Message string
@@ -61,7 +137,7 @@ func Now() string             { return time.Now().Format(time.RFC3339) }
 func (s *Store) Init() error {
 	_, err := s.DB.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000;
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,password_encrypted TEXT NOT NULL,device_code TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,keepalive_enabled INTEGER NOT NULL DEFAULT 1,login_enabled INTEGER NOT NULL DEFAULT 1,login_cron TEXT NOT NULL DEFAULT '0 3 * * *',chat_enabled INTEGER NOT NULL DEFAULT 1,chat_cron TEXT NOT NULL DEFAULT '10 3 * * *',pc_enabled INTEGER NOT NULL DEFAULT 1,pc_cron TEXT NOT NULL DEFAULT '5 3 * * *',device_status TEXT NOT NULL DEFAULT 'unknown',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,password_encrypted TEXT NOT NULL,device_code TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,keepalive_enabled INTEGER NOT NULL DEFAULT 1,keepalive_mode TEXT NOT NULL DEFAULT 'always',keepalive_start TEXT NOT NULL DEFAULT '08:00',keepalive_end TEXT NOT NULL DEFAULT '23:00',keepalive_weekdays TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7',login_enabled INTEGER NOT NULL DEFAULT 1,login_cron TEXT NOT NULL DEFAULT '0 3 * * *',chat_enabled INTEGER NOT NULL DEFAULT 1,chat_cron TEXT NOT NULL DEFAULT '10 3 * * *',pc_enabled INTEGER NOT NULL DEFAULT 1,pc_cron TEXT NOT NULL DEFAULT '5 3 * * *',device_status TEXT NOT NULL DEFAULT 'unknown',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,task_type TEXT NOT NULL,trigger_source TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,exit_code INTEGER,log_path TEXT NOT NULL,message TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS scheduler_claims(account_id INTEGER NOT NULL,task_type TEXT NOT NULL,minute_key TEXT NOT NULL,PRIMARY KEY(account_id,task_type,minute_key));
 CREATE TABLE IF NOT EXISTS account_platform_status(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,total_points INTEGER,tasks_json TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');
@@ -75,6 +151,10 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_started_at ON task_runs(started_at DESC
 		// switches. Preserve their previous behaviour while adding the new fields.
 		for _, migration := range []struct{ name, definition string }{
 			{"keepalive_enabled", "INTEGER NOT NULL DEFAULT 1"},
+			{"keepalive_mode", "TEXT NOT NULL DEFAULT 'always'"},
+			{"keepalive_start", "TEXT NOT NULL DEFAULT '08:00'"},
+			{"keepalive_end", "TEXT NOT NULL DEFAULT '23:00'"},
+			{"keepalive_weekdays", "TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7'"},
 			{"login_enabled", "INTEGER NOT NULL DEFAULT 1"},
 			{"login_cron", "TEXT NOT NULL DEFAULT '0 3 * * *'"},
 		} {
@@ -107,7 +187,7 @@ func (s *Store) SetSetting(k, v string) error {
 func scanAccount(r interface{ Scan(...any) error }) (Account, error) {
 	var a Account
 	var en, keepalive, login, ch, pc int
-	e := r.Scan(&a.ID, &a.Name, &a.Username, &a.PasswordEncrypted, &a.DeviceCode, &en, &keepalive, &login, &a.LoginCron, &ch, &a.ChatCron, &pc, &a.PCCron, &a.DeviceStatus)
+	e := r.Scan(&a.ID, &a.Name, &a.Username, &a.PasswordEncrypted, &a.DeviceCode, &en, &keepalive, &a.KeepaliveMode, &a.KeepaliveStart, &a.KeepaliveEnd, &a.KeepaliveWeekdays, &login, &a.LoginCron, &ch, &a.ChatCron, &pc, &a.PCCron, &a.DeviceStatus)
 	a.Enabled = en != 0
 	a.KeepaliveEnabled = keepalive != 0
 	a.LoginEnabled = login != 0
@@ -116,7 +196,7 @@ func scanAccount(r interface{ Scan(...any) error }) (Account, error) {
 	return a, e
 }
 
-const accountCols = "id,name,username,password_encrypted,device_code,enabled,keepalive_enabled,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status"
+const accountCols = "id,name,username,password_encrypted,device_code,enabled,keepalive_enabled,keepalive_mode,keepalive_start,keepalive_end,keepalive_weekdays,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status"
 
 func (s *Store) Accounts() ([]Account, error) {
 	rows, e := s.DB.Query("SELECT " + accountCols + " FROM accounts ORDER BY id")
@@ -150,7 +230,7 @@ func (s *Store) SaveAccount(a Account, password string, key []byte, encrypt func
 		if e != nil {
 			return 0, e
 		}
-		r, e := s.DB.Exec(`INSERT INTO accounts(name,username,password_encrypted,device_code,enabled,keepalive_enabled,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'unknown',?,?)`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, now, now)
+		r, e := s.DB.Exec(`INSERT INTO accounts(name,username,password_encrypted,device_code,enabled,keepalive_enabled,keepalive_mode,keepalive_start,keepalive_end,keepalive_weekdays,login_enabled,login_cron,chat_enabled,chat_cron,pc_enabled,pc_cron,device_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unknown',?,?)`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, normalizedKeepaliveMode(a), normalizedKeepaliveStart(a), normalizedKeepaliveEnd(a), normalizedKeepaliveWeekdays(a), a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, now, now)
 		if e != nil {
 			return 0, e
 		}
@@ -167,8 +247,39 @@ func (s *Store) SaveAccount(a Account, password string, key []byte, encrypt func
 			return 0, e
 		}
 	}
-	_, e = s.DB.Exec(`UPDATE accounts SET name=?,username=?,password_encrypted=?,device_code=?,enabled=?,keepalive_enabled=?,login_enabled=?,login_cron=?,chat_enabled=?,chat_cron=?,pc_enabled=?,pc_cron=?,device_status=CASE WHEN username<>? OR device_code<>? THEN 'unknown' ELSE device_status END,updated_at=? WHERE id=?`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, a.Username, a.DeviceCode, now, a.ID)
+	_, e = s.DB.Exec(`UPDATE accounts SET name=?,username=?,password_encrypted=?,device_code=?,enabled=?,keepalive_enabled=?,keepalive_mode=?,keepalive_start=?,keepalive_end=?,keepalive_weekdays=?,login_enabled=?,login_cron=?,chat_enabled=?,chat_cron=?,pc_enabled=?,pc_cron=?,device_status=CASE WHEN username<>? OR device_code<>? THEN 'unknown' ELSE device_status END,updated_at=? WHERE id=?`, a.Name, a.Username, enc, a.DeviceCode, a.Enabled, a.KeepaliveEnabled, normalizedKeepaliveMode(a), normalizedKeepaliveStart(a), normalizedKeepaliveEnd(a), normalizedKeepaliveWeekdays(a), a.LoginEnabled, a.LoginCron, a.ChatEnabled, a.ChatCron, a.PCEnabled, a.PCCron, a.Username, a.DeviceCode, now, a.ID)
 	return a.ID, e
+}
+
+func normalizedKeepaliveMode(a Account) string {
+	if !a.KeepaliveEnabled || a.KeepaliveMode == KeepaliveOff {
+		return KeepaliveOff
+	}
+	if a.KeepaliveMode == KeepaliveScheduled {
+		return KeepaliveScheduled
+	}
+	return KeepaliveAlways
+}
+
+func normalizedKeepaliveStart(a Account) string {
+	if _, ok := clockMinute(a.KeepaliveStart); ok {
+		return a.KeepaliveStart
+	}
+	return "08:00"
+}
+
+func normalizedKeepaliveEnd(a Account) string {
+	if _, ok := clockMinute(a.KeepaliveEnd); ok {
+		return a.KeepaliveEnd
+	}
+	return "23:00"
+}
+
+func normalizedKeepaliveWeekdays(a Account) string {
+	if strings.TrimSpace(a.KeepaliveWeekdays) == "" {
+		return "1,2,3,4,5,6,7"
+	}
+	return a.KeepaliveWeekdays
 }
 func (s *Store) DeleteAccount(id int64) error {
 	_, e := s.DB.Exec("DELETE FROM accounts WHERE id=?", id)

@@ -23,14 +23,16 @@ import (
 
 type clientState struct {
 	client  *ctyun.Client
+	ctx     context.Context
 	cancel  context.CancelFunc
 	status  string
 	workers int
 	updated time.Time
 }
 type running struct {
-	cancel context.CancelFunc
-	typ    string
+	cancel    context.CancelFunc
+	typ       string
+	accountID int64
 }
 type VerifySession struct {
 	Client  *ctyun.Client
@@ -340,7 +342,7 @@ func (m *Manager) client(ctx context.Context, a storage.Account) (*ctyun.Client,
 	m.mu.RLock()
 	s := m.clients[a.ID]
 	m.mu.RUnlock()
-	if s != nil && s.client.Profile != nil {
+	if s != nil && s.client != nil && s.client.Profile != nil {
 		return s.client, nil
 	}
 	c, e := m.newClient(a)
@@ -380,18 +382,97 @@ func (m *Manager) RestartKeepalive() {
 	}
 	m.clients = map[int64]*clientState{}
 	m.mu.Unlock()
+	now := time.Now()
 	for _, a := range accounts {
-		if a.Enabled && a.KeepaliveEnabled && a.DeviceStatus != "pending" {
-			a := a
-			go m.startAccount(a)
-		}
+		m.reconcileAccountKeepalive(a, now)
 	}
 }
+
+func (m *Manager) reconcileKeepalive(now time.Time) {
+	accounts, e := m.store.Accounts()
+	if e != nil {
+		m.logf("同步保活周期失败：%v", e)
+		return
+	}
+	for _, a := range accounts {
+		m.reconcileAccountKeepalive(a, now)
+	}
+}
+
+func (m *Manager) reconcileAccountKeepalive(a storage.Account, now time.Time) {
+	want := a.DeviceStatus != "pending" && a.KeepaliveActiveAt(now)
+	m.mu.RLock()
+	state := m.clients[a.ID]
+	running := state != nil && state.ctx != nil && state.ctx.Err() == nil
+	usageActive := m.accountUsageActiveLocked(a.ID)
+	m.mu.RUnlock()
+	if want && !running {
+		go m.startAccount(a)
+		return
+	}
+	if !want && running && usageActive {
+		return
+	}
+	if !want && running {
+		m.stopAccountKeepalive(a, keepaliveIdleStatus(a))
+		return
+	}
+	if !want && !running {
+		m.mu.Lock()
+		current := m.clients[a.ID]
+		if current == nil || current.ctx == nil || current.ctx.Err() != nil {
+			m.clients[a.ID] = &clientState{status: keepaliveIdleStatus(a), updated: now}
+		}
+		m.mu.Unlock()
+	}
+}
+
+func (m *Manager) accountUsageActiveLocked(accountID int64) bool {
+	for _, task := range m.active {
+		if task.accountID == accountID && task.typ == fmt.Sprintf("%d:pc", accountID) {
+			return true
+		}
+	}
+	return false
+}
+
+func keepaliveIdleStatus(a storage.Account) string {
+	if !a.Enabled {
+		return "账号已停用"
+	}
+	if a.DeviceStatus == "pending" {
+		return "等待短信验证"
+	}
+	if a.EffectiveKeepaliveMode() == storage.KeepaliveScheduled {
+		return fmt.Sprintf("等待定时保活（%s–%s）", a.KeepaliveStart, a.KeepaliveEnd)
+	}
+	return "持续保活已关闭"
+}
+
+func (m *Manager) stopAccountKeepalive(a storage.Account, status string) {
+	m.mu.Lock()
+	state := m.clients[a.ID]
+	if state != nil && state.cancel != nil {
+		state.cancel()
+	}
+	m.clients[a.ID] = &clientState{status: status, updated: time.Now()}
+	m.mu.Unlock()
+	m.logf("[%s] %s", a.Name, status)
+}
+
 func (m *Manager) startAccount(a storage.Account) {
 	ctx, cancel := context.WithCancel(m.ctx)
+	m.mu.Lock()
+	if current := m.clients[a.ID]; current != nil && current.ctx != nil && current.ctx.Err() == nil {
+		m.mu.Unlock()
+		cancel()
+		return
+	}
+	m.clients[a.ID] = &clientState{ctx: ctx, cancel: cancel, status: "正在启动保活", updated: time.Now()}
+	m.mu.Unlock()
 	c, e := m.newClient(a)
 	if e != nil {
-		m.setState(a.ID, nil, "凭据错误："+e.Error(), 0, cancel)
+		m.setState(a.ID, nil, "凭据错误："+e.Error(), 0, ctx, cancel)
 		return
 	}
 	var p ctyun.Profile
@@ -400,7 +481,7 @@ func (m *Manager) startAccount(a storage.Account) {
 	} else {
 		p, e = c.Login(ctx)
 		if e != nil {
-			m.setState(a.ID, c, "登录失败："+e.Error(), 0, cancel)
+			m.setState(a.ID, c, "登录失败："+e.Error(), 0, ctx, cancel)
 			m.logf("[%s] %v", a.Name, e)
 			return
 		}
@@ -408,7 +489,7 @@ func (m *Manager) startAccount(a storage.Account) {
 	}
 	if !p.BondedDevice {
 		_ = m.store.SetDeviceStatus(a.ID, "pending")
-		m.setState(a.ID, c, "等待短信验证", 0, cancel)
+		m.setState(a.ID, c, "等待短信验证", 0, ctx, cancel)
 		return
 	}
 	_ = m.store.SetDeviceStatus(a.ID, "verified")
@@ -423,13 +504,13 @@ func (m *Manager) startAccount(a storage.Account) {
 		}
 	}
 	if e != nil {
-		m.setState(a.ID, c, "读取云电脑失败："+e.Error(), 0, cancel)
+		m.setState(a.ID, c, "读取云电脑失败："+e.Error(), 0, ctx, cancel)
 		return
 	}
 	workers := 0
 	forbidden := 0
 	issues := 0
-	m.setState(a.ID, c, "正在建立保活", 0, cancel)
+	m.setState(a.ID, c, "正在建立保活", 0, ctx, cancel)
 	for _, d := range desktops {
 		if d.Forbidden {
 			forbidden++
@@ -440,7 +521,7 @@ func (m *Manager) startAccount(a storage.Account) {
 			var startErr error
 			d, startErr = waitForDesktopRunning(ctx, c, d, func(message string) {
 				m.logf("[%s/%s] %s", a.Name, d.Name(), message)
-				m.setState(a.ID, c, message, workers, cancel)
+				m.setState(a.ID, c, message, workers, ctx, cancel)
 			})
 			if startErr != nil {
 				if ctx.Err() != nil {
@@ -495,7 +576,7 @@ func (m *Manager) startAccount(a storage.Account) {
 			status = "已登录，暂无可保活的云电脑"
 		}
 	}
-	m.setState(a.ID, c, status, workers, cancel)
+	m.setState(a.ID, c, status, workers, ctx, cancel)
 }
 
 func waitForDesktopRunning(ctx context.Context, c *ctyun.Client, desktop ctyun.Desktop, notify func(string)) (ctyun.Desktop, error) {
@@ -614,9 +695,12 @@ func sameDesktop(left, right ctyun.Desktop) bool {
 	}
 	return left.ObjectID != "" && left.ObjectID == right.ObjectID
 }
-func (m *Manager) setState(id int64, c *ctyun.Client, status string, workers int, cancel context.CancelFunc) {
+func (m *Manager) setState(id int64, c *ctyun.Client, status string, workers int, ctx context.Context, cancel context.CancelFunc) {
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	m.mu.Lock()
-	m.clients[id] = &clientState{client: c, status: status, workers: workers, updated: time.Now(), cancel: cancel}
+	m.clients[id] = &clientState{client: c, ctx: ctx, status: status, workers: workers, updated: time.Now(), cancel: cancel}
 	m.mu.Unlock()
 }
 func (m *Manager) KeepaliveStatus() (string, int) {
@@ -785,7 +869,7 @@ func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.mu.Lock()
 	delete(m.starting, key)
-	m.active[runID] = running{cancel: cancel, typ: key}
+	m.active[runID] = running{cancel: cancel, typ: key, accountID: id}
 	m.mu.Unlock()
 	go m.run(ctx, cancel, runID, id, typ, trigger, path)
 	return runID, nil
@@ -1415,6 +1499,7 @@ func (m *Manager) scheduler() {
 		case <-m.ctx.Done():
 			return
 		case now := <-ticker.C:
+			m.reconcileKeepalive(now)
 			if day := now.Format("20060102"); day != lastLogCleanup {
 				if e := m.CleanupExpiredLogs(); e != nil {
 					m.logf("自动清理过期日志失败：%v", e)

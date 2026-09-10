@@ -196,6 +196,16 @@ input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .password-toggle[aria-pressed="true"] .eye-closed { display: block; }
 .switch-row { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
 .switch-row input { width: 18px; min-height: 18px; accent-color: var(--blue-strong); }
+.keepalive-config { display: grid; gap: 18px; }
+.keepalive-config > label { max-width: 360px; }
+.keepalive-period { display: grid; gap: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 11px; background: rgba(247, 250, 253, .72); }
+.form-label { display: block; margin-bottom: 9px; color: #536174; font-size: .88rem; font-weight: 650; }
+.weekday-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.weekday-option { position: relative; display: block; cursor: pointer; }
+.weekday-option input { position: absolute; opacity: 0; pointer-events: none; }
+.weekday-option span { display: block; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; color: var(--muted); font-size: .82rem; transition: .16s ease; }
+.weekday-option input:checked + span { border-color: var(--blue); background: var(--blue-soft); color: var(--blue-strong); font-weight: 750; }
+.weekday-option input:focus-visible + span { box-shadow: 0 0 0 3px rgba(89, 168, 232, .14); }
 .schedule-box { display: grid; grid-template-columns: minmax(210px, .7fr) 1fr; gap: 24px; align-items: center; padding: 17px 0; }
 .schedule-box + .schedule-box { border-top: 1px solid var(--line); }
 .form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 20px; }

@@ -3,6 +3,8 @@ package web
 import (
 	"testing"
 	"time"
+
+	"github.com/vay1314/CtYun-Keeper/internal/storage"
 )
 
 func TestFormatTime(t *testing.T) {
@@ -15,6 +17,23 @@ func TestFormatTime(t *testing.T) {
 	for input, want := range tests {
 		if got := formatTime(input); got != want {
 			t.Errorf("formatTime(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestValidateKeepaliveSettings(t *testing.T) {
+	valid := storage.Account{KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1,3,5"}
+	if err := validateKeepaliveSettings(valid); err != nil {
+		t.Fatalf("valid cross-midnight schedule was rejected: %v", err)
+	}
+	for _, account := range []storage.Account{
+		{KeepaliveMode: "unknown"},
+		{KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "08:00", KeepaliveEnd: "08:00", KeepaliveWeekdays: "1"},
+		{KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "08:00", KeepaliveEnd: "09:00"},
+		{KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "08:00", KeepaliveEnd: "09:00", KeepaliveWeekdays: "8"},
+	} {
+		if err := validateKeepaliveSettings(account); err == nil {
+			t.Fatalf("invalid keepalive settings were accepted: %#v", account)
 		}
 	}
 }

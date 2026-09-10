@@ -15,7 +15,17 @@ document.addEventListener("click", (event) => {
   input.focus();
 });
 
+const syncKeepalivePeriod = (select) => {
+  const period = select?.closest(".keepalive-config")?.querySelector("[data-keepalive-period]");
+  if (period) period.hidden = select.value !== "scheduled";
+};
+
+document.addEventListener("change", (event) => {
+  if (event.target.matches("[data-keepalive-mode]")) syncKeepalivePeriod(event.target);
+});
+
 document.addEventListener("DOMContentLoaded", () => {
+	document.querySelectorAll("[data-keepalive-mode]").forEach(syncKeepalivePeriod);
   const toggle = document.querySelector(".sidebar-toggle");
   const backdrop = document.querySelector(".sidebar-backdrop");
   const closeSidebar = () => {

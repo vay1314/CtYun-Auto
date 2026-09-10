@@ -341,14 +341,22 @@ func (s *Server) dashboardMetrics() string {
 
 	keepaliveText := "当前没有云电脑正在保活"
 	keepaliveAccounts := 0
+	activeKeepaliveAccounts := 0
+	now := time.Now()
 	for _, account := range accounts {
-		if account.Enabled && account.KeepaliveEnabled {
+		if account.Enabled && account.EffectiveKeepaliveMode() != storage.KeepaliveOff {
 			keepaliveAccounts++
+			if account.KeepaliveActiveAt(now) {
+				activeKeepaliveAccounts++
+			}
 		}
 	}
 	if keepaliveAccounts == 0 {
 		state = "已关闭"
-		keepaliveText = "未启用 24 小时持续保活"
+		keepaliveText = "未启用云电脑保活"
+	} else if activeKeepaliveAccounts == 0 && workers == 0 {
+		state = "等待周期"
+		keepaliveText = "当前不在定时保活时段"
 	}
 	if workers > 0 {
 		keepaliveText = fmt.Sprintf("正在保活 %d 台云电脑", workers)
@@ -412,14 +420,11 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 func (s *Server) accountTable() string {
 	values, _ := s.store.Accounts()
 	var b strings.Builder
-	b.WriteString(`<article id=account-table class="panel table-panel" hx-get=/partials/accounts hx-trigger="every 5s" hx-swap=outerHTML><div class=table-wrap><table><thead><tr><th>账号</th><th>持续保活</th><th>登录任务</th><th>AI 对话任务</th><th>时长任务</th><th>操作</th></tr></thead><tbody>`)
+	b.WriteString(`<article id=account-table class="panel table-panel" hx-get=/partials/accounts hx-trigger="every 5s" hx-swap=outerHTML><div class=table-wrap><table><thead><tr><th>账号</th><th>保活模式</th><th>登录任务</th><th>AI 对话任务</th><th>时长任务</th><th>操作</th></tr></thead><tbody>`)
 	for _, a := range values {
 		status := s.manager.AccountStatus(a.ID)
-		keepaliveStatus := status
-		if !a.KeepaliveEnabled {
-			keepaliveStatus = "持续保活已关闭"
-		}
-		fmt.Fprintf(&b, `<tr><td><strong>%s</strong><small>%s</small></td><td><span class="pill %s">%s</span><small>%s</small></td><td>%s</td><td>%s</td><td>%s</td><td class=actions><a href="/accounts/%d/edit">编辑</a><a href="/accounts/%d/redeem">兑换</a><form method=post action="/accounts/%d/device-verification/start"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=link-button>设备验证</button></form><form method=post action="/accounts/%d/delete"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>删除</button></form></td></tr>`, esc(a.Name), esc(mask(a.Username)), map[bool]string{true: "success", false: "warning"}[a.Enabled && a.KeepaliveEnabled], map[bool]string{true: "启用", false: "关闭"}[a.Enabled && a.KeepaliveEnabled], esc(keepaliveStatus), scheduleSummary(a.LoginEnabled, a.LoginCron), scheduleSummary(a.ChatEnabled, a.ChatCron), scheduleSummary(a.PCEnabled, a.PCCron), a.ID, a.ID, a.ID, a.ID)
+		modeLabel, modeTone := keepaliveModeLabel(a)
+		fmt.Fprintf(&b, `<tr><td><strong>%s</strong><small>%s</small></td><td><span class="pill %s">%s</span><small>%s</small></td><td>%s</td><td>%s</td><td>%s</td><td class=actions><a href="/accounts/%d/edit">编辑</a><a href="/accounts/%d/redeem">兑换</a><form method=post action="/accounts/%d/device-verification/start"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=link-button>设备验证</button></form><form method=post action="/accounts/%d/delete"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-link>删除</button></form></td></tr>`, esc(a.Name), esc(mask(a.Username)), modeTone, modeLabel, esc(status), scheduleSummary(a.LoginEnabled, a.LoginCron), scheduleSummary(a.ChatEnabled, a.ChatCron), scheduleSummary(a.PCEnabled, a.PCCron), a.ID, a.ID, a.ID, a.ID)
 	}
 	b.WriteString(`</tbody></table></div></article>`)
 	return b.String()
@@ -442,7 +447,7 @@ func (s *Server) accountNew(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	s.accountForm(w, r, storage.Account{Enabled: true, KeepaliveEnabled: true, LoginEnabled: true, LoginCron: "0 3 * * *", PCEnabled: true, PCCron: "5 3 * * *", ChatEnabled: true, ChatCron: "10 3 * * *", DeviceCode: security.RandomToken(24)})
+	s.accountForm(w, r, storage.Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: storage.KeepaliveAlways, KeepaliveStart: "08:00", KeepaliveEnd: "23:00", KeepaliveWeekdays: "1,2,3,4,5,6,7", LoginEnabled: true, LoginCron: "0 3 * * *", PCEnabled: true, PCCron: "5 3 * * *", ChatEnabled: true, ChatCron: "10 3 * * *", DeviceCode: security.RandomToken(24)})
 }
 
 func scheduleSummary(enabled bool, expression string) string {
@@ -451,6 +456,76 @@ func scheduleSummary(enabled bool, expression string) string {
 	}
 	return `<span class="pill success">启用</span><small>` + esc(expression) + `</small>`
 }
+
+func keepaliveModeLabel(a storage.Account) (string, string) {
+	if !a.Enabled {
+		return "账号停用", "warning"
+	}
+	switch a.EffectiveKeepaliveMode() {
+	case storage.KeepaliveAlways:
+		return "全天", "success"
+	case storage.KeepaliveScheduled:
+		return "定时", "success"
+	default:
+		return "关闭", "warning"
+	}
+}
+
+func keepaliveForm(a storage.Account) string {
+	mode := a.EffectiveKeepaliveMode()
+	if a.KeepaliveStart == "" {
+		a.KeepaliveStart = "08:00"
+	}
+	if a.KeepaliveEnd == "" {
+		a.KeepaliveEnd = "23:00"
+	}
+	if a.KeepaliveWeekdays == "" {
+		a.KeepaliveWeekdays = "1,2,3,4,5,6,7"
+	}
+	days := map[string]bool{}
+	for _, day := range strings.Split(a.KeepaliveWeekdays, ",") {
+		days[strings.TrimSpace(day)] = true
+	}
+	labels := []string{"周一", "周二", "周三", "周四", "周五", "周六", "周日"}
+	var weekdays strings.Builder
+	for i, label := range labels {
+		fmt.Fprintf(&weekdays, `<label class=weekday-option><input type=checkbox name=keepalive_weekdays value="%d"%s><span>%s</span></label>`, i+1, checked(days[strconv.Itoa(i+1)]), label)
+	}
+	return fmt.Sprintf(`<div class=keepalive-config><label>保活模式<select name=keepalive_mode data-keepalive-mode><option value=off%s>关闭</option><option value=always%s>全天保活</option><option value=scheduled%s>定时保活</option></select></label><div class=keepalive-period data-keepalive-period%s><div class=form-grid><label>开始时间<input type=time name=keepalive_start value="%s"></label><label>结束时间<input type=time name=keepalive_end value="%s"></label></div><div><span class=form-label>运行日期</span><div class=weekday-options>%s</div></div></div><p class=muted>定时保活仅在所选时间段建立常驻连接；跨天时间段按开始日计算。积分任务仍按各自计划执行，时长任务需要时会临时连接。</p></div>`, selected(mode == storage.KeepaliveOff), selected(mode == storage.KeepaliveAlways), selected(mode == storage.KeepaliveScheduled), map[bool]string{true: "", false: " hidden"}[mode == storage.KeepaliveScheduled], esc(a.KeepaliveStart), esc(a.KeepaliveEnd), weekdays.String())
+}
+
+func validateKeepaliveSettings(a storage.Account) error {
+	switch a.KeepaliveMode {
+	case storage.KeepaliveOff, storage.KeepaliveAlways:
+		return nil
+	case storage.KeepaliveScheduled:
+		start, startErr := time.Parse("15:04", a.KeepaliveStart)
+		end, endErr := time.Parse("15:04", a.KeepaliveEnd)
+		if startErr != nil || endErr != nil {
+			return fmt.Errorf("定时保活的开始和结束时间格式不正确")
+		}
+		if start.Hour() == end.Hour() && start.Minute() == end.Minute() {
+			return fmt.Errorf("定时保活的开始时间和结束时间不能相同")
+		}
+		if strings.TrimSpace(a.KeepaliveWeekdays) == "" {
+			return fmt.Errorf("定时保活至少需要选择一个运行日期")
+		}
+		seen := map[int]bool{}
+		for _, raw := range strings.Split(a.KeepaliveWeekdays, ",") {
+			day, err := strconv.Atoi(strings.TrimSpace(raw))
+			if err != nil || day < 1 || day > 7 {
+				return fmt.Errorf("定时保活的运行日期无效")
+			}
+			seen[day] = true
+		}
+		if len(seen) == 0 {
+			return fmt.Errorf("定时保活至少需要选择一个运行日期")
+		}
+		return nil
+	default:
+		return fmt.Errorf("保活模式无效")
+	}
+}
 func (s *Server) accountForm(w http.ResponseWriter, r *http.Request, a storage.Account) {
 	title := "添加账号"
 	required := " required"
@@ -458,7 +533,7 @@ func (s *Server) accountForm(w http.ResponseWriter, r *http.Request, a storage.A
 		title = "编辑账号"
 		required = ""
 	}
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<div class=password-field><input name=password type=password%s placeholder="%s">%s</div></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号</span></label><label class=switch-row><input type=checkbox name=keepalive_enabled%s><span>启用 24 小时持续保活</span></label><p class=muted>关闭持续保活后，每日积分任务仍会按计划执行；时长任务会临时连接云电脑，完成 1 小时后自动断开。</p></fieldset><fieldset><legend>每日积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=login_enabled%s><span>启用登录任务</span></label><label>Cron 计划<input name=login_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用时长任务</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话任务</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], passwordToggle(), esc(a.DeviceCode), checked(a.Enabled), checked(a.KeepaliveEnabled), checked(a.LoginEnabled), esc(a.LoginCron), checked(a.PCEnabled), esc(a.PCCron), checked(a.ChatEnabled), esc(a.ChatCron))
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>账号配置</p><h1>%s</h1></div><a class="secondary button" href=/accounts>返回</a></header><form method=post action=/accounts/save class="panel form-panel"><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=account_id value="%d"><fieldset><legend>登录信息</legend><div class=form-grid><label>显示名称<input name=name value="%s" required></label><label>天翼云账号<input name=username value="%s" required></label><label>密码<div class=password-field><input name=password type=password%s placeholder="%s">%s</div></label><label>设备码<input name=device_code value="%s" required></label></div><label class=switch-row><input type=checkbox name=enabled%s><span>启用账号</span></label></fieldset><fieldset><legend>云电脑保活</legend>%s</fieldset><fieldset><legend>每日积分任务</legend><div class=schedule-box><label class=switch-row><input type=checkbox name=login_enabled%s><span>启用登录任务</span></label><label>Cron 计划<input name=login_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=pc_enabled%s><span>启用时长任务</span></label><label>Cron 计划<input name=pc_cron value="%s" required></label></div><div class=schedule-box><label class=switch-row><input type=checkbox name=chat_enabled%s><span>启用 AI 对话任务</span></label><label>Cron 计划<input name=chat_cron value="%s" required></label></div></fieldset><div class=form-actions><a href=/accounts>取消</a><button class=primary>保存并检查设备</button></div></form>`, title, a.ID, esc(a.Name), esc(a.Username), required, map[bool]string{true: "留空表示不修改", false: "请输入密码"}[a.ID > 0], passwordToggle(), esc(a.DeviceCode), checked(a.Enabled), keepaliveForm(a), checked(a.LoginEnabled), esc(a.LoginCron), checked(a.PCEnabled), esc(a.PCCron), checked(a.ChatEnabled), esc(a.ChatCron))
 	s.page(w, r, title, content, true)
 }
 func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
@@ -471,7 +546,12 @@ func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.FormValue("account_id"), 10, 64)
-	a := storage.Account{ID: id, Name: strings.TrimSpace(r.FormValue("name")), Username: strings.TrimSpace(r.FormValue("username")), DeviceCode: strings.TrimSpace(r.FormValue("device_code")), Enabled: r.Form.Has("enabled"), KeepaliveEnabled: r.Form.Has("keepalive_enabled"), LoginEnabled: r.Form.Has("login_enabled"), LoginCron: strings.TrimSpace(r.FormValue("login_cron")), ChatEnabled: r.Form.Has("chat_enabled"), ChatCron: strings.TrimSpace(r.FormValue("chat_cron")), PCEnabled: r.Form.Has("pc_enabled"), PCCron: strings.TrimSpace(r.FormValue("pc_cron"))}
+	mode := strings.TrimSpace(r.FormValue("keepalive_mode"))
+	a := storage.Account{ID: id, Name: strings.TrimSpace(r.FormValue("name")), Username: strings.TrimSpace(r.FormValue("username")), DeviceCode: strings.TrimSpace(r.FormValue("device_code")), Enabled: r.Form.Has("enabled"), KeepaliveEnabled: mode != storage.KeepaliveOff, KeepaliveMode: mode, KeepaliveStart: strings.TrimSpace(r.FormValue("keepalive_start")), KeepaliveEnd: strings.TrimSpace(r.FormValue("keepalive_end")), KeepaliveWeekdays: strings.Join(r.Form["keepalive_weekdays"], ","), LoginEnabled: r.Form.Has("login_enabled"), LoginCron: strings.TrimSpace(r.FormValue("login_cron")), ChatEnabled: r.Form.Has("chat_enabled"), ChatCron: strings.TrimSpace(r.FormValue("chat_cron")), PCEnabled: r.Form.Has("pc_enabled"), PCCron: strings.TrimSpace(r.FormValue("pc_cron"))}
+	if e := validateKeepaliveSettings(a); e != nil {
+		redirect(w, r, "/accounts", e.Error(), true)
+		return
+	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	for _, schedule := range []struct{ label, expression string }{{"登录任务", a.LoginCron}, {"时长任务", a.PCCron}, {"AI 对话任务", a.ChatCron}} {
 		if _, parseErr := parser.Parse(schedule.expression); parseErr != nil {
@@ -499,7 +579,7 @@ func (s *Server) saveAccount(w http.ResponseWriter, r *http.Request) {
 	if bound {
 		s.manager.RestartKeepalive()
 		message := "账号已保存，积分任务计划已生效"
-		if a.KeepaliveEnabled {
+		if a.EffectiveKeepaliveMode() != storage.KeepaliveOff {
 			message = "账号已保存，持续保活和积分任务计划已生效"
 		}
 		redirect(w, r, "/accounts", message, false)

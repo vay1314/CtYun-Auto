@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -136,5 +137,31 @@ func TestStartTaskRejectsReservedTaskKey(t *testing.T) {
 	manager.starting["1:redeem"] = struct{}{}
 	if _, err = manager.StartTask(1, "redeem", "test"); err == nil {
 		t.Fatal("a task being created must block a duplicate start")
+	}
+}
+
+func TestScheduledKeepaliveWaitsForUsageTaskBeforeStopping(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(store, nil, dir, "")
+	defer manager.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	account := storage.Account{ID: 7, Name: "test", Enabled: true, KeepaliveEnabled: true, KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "08:00", KeepaliveEnd: "09:00", KeepaliveWeekdays: "1"}
+	manager.clients[account.ID] = &clientState{ctx: ctx, cancel: cancel, status: "保活运行中"}
+	manager.active[1] = running{typ: "7:pc", accountID: account.ID, cancel: func() {}}
+
+	outside := time.Date(2026, 9, 7, 10, 0, 0, 0, time.Local)
+	manager.reconcileAccountKeepalive(account, outside)
+	if ctx.Err() != nil {
+		t.Fatal("keepalive was stopped while the usage task was active")
+	}
+	delete(manager.active, 1)
+	manager.reconcileAccountKeepalive(account, outside)
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatal("keepalive was not stopped after the usage task finished")
 	}
 }

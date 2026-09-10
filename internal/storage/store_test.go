@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLegacyAccountMigrationEnablesExistingKeepaliveAndLoginTask(t *testing.T) {
@@ -37,7 +38,7 @@ func TestLegacyAccountMigrationEnablesExistingKeepaliveAndLoginTask(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.KeepaliveEnabled || !a.LoginEnabled || a.LoginCron != "0 3 * * *" {
+	if !a.KeepaliveEnabled || a.KeepaliveMode != KeepaliveAlways || a.KeepaliveStart != "08:00" || a.KeepaliveEnd != "23:00" || a.KeepaliveWeekdays != "1,2,3,4,5,6,7" || !a.LoginEnabled || a.LoginCron != "0 3 * * *" {
 		t.Fatalf("legacy defaults not migrated: %#v", a)
 	}
 }
@@ -96,7 +97,7 @@ func TestAccountAutomationSettingsRoundTrip(t *testing.T) {
 	defer s.Close()
 	a := Account{
 		Name: "scheduled", Username: "user", DeviceCode: "device", Enabled: true,
-		KeepaliveEnabled: false, LoginEnabled: true, LoginCron: "0 2 * * *",
+		KeepaliveEnabled: true, KeepaliveMode: KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1,3,5", LoginEnabled: true, LoginCron: "0 2 * * *",
 		PCEnabled: true, PCCron: "5 2 * * *", ChatEnabled: true, ChatCron: "10 2 * * *",
 	}
 	id, err := s.SaveAccount(a, "password", []byte("unused"), func(value string, _ []byte) (string, error) { return value, nil })
@@ -107,8 +108,34 @@ func TestAccountAutomationSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.KeepaliveEnabled || !got.LoginEnabled || got.LoginCron != a.LoginCron || got.PCCron != a.PCCron || got.ChatCron != a.ChatCron {
+	if !got.KeepaliveEnabled || got.KeepaliveMode != KeepaliveScheduled || got.KeepaliveStart != "22:00" || got.KeepaliveEnd != "06:00" || got.KeepaliveWeekdays != "1,3,5" || !got.LoginEnabled || got.LoginCron != a.LoginCron || got.PCCron != a.PCCron || got.ChatCron != a.ChatCron {
 		t.Fatalf("automation settings were not preserved: %#v", got)
+	}
+}
+
+func TestKeepaliveActiveAt(t *testing.T) {
+	location := time.FixedZone("CST", 8*60*60)
+	sameDay := Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: KeepaliveScheduled, KeepaliveStart: "08:00", KeepaliveEnd: "23:00", KeepaliveWeekdays: "1"}
+	for _, test := range []struct {
+		name   string
+		value  Account
+		now    time.Time
+		active bool
+	}{
+		{"same-day start", sameDay, time.Date(2026, 9, 7, 8, 0, 0, 0, location), true},
+		{"same-day end excluded", sameDay, time.Date(2026, 9, 7, 23, 0, 0, 0, location), false},
+		{"unselected weekday", sameDay, time.Date(2026, 9, 8, 12, 0, 0, 0, location), false},
+		{"cross-midnight start day", Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1"}, time.Date(2026, 9, 7, 23, 0, 0, 0, location), true},
+		{"cross-midnight next day", Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1"}, time.Date(2026, 9, 8, 5, 59, 0, 0, location), true},
+		{"cross-midnight end excluded", Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1"}, time.Date(2026, 9, 8, 6, 0, 0, 0, location), false},
+		{"always", Account{Enabled: true, KeepaliveEnabled: true, KeepaliveMode: KeepaliveAlways}, time.Date(2026, 9, 8, 6, 0, 0, 0, location), true},
+		{"off", Account{Enabled: true, KeepaliveEnabled: false, KeepaliveMode: KeepaliveAlways}, time.Date(2026, 9, 8, 6, 0, 0, 0, location), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.value.KeepaliveActiveAt(test.now); got != test.active {
+				t.Fatalf("KeepaliveActiveAt() = %v, want %v", got, test.active)
+			}
+		})
 	}
 }
 
