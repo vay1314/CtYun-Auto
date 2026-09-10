@@ -78,7 +78,7 @@ func TestPasswordAuthenticationCanBeDisabled(t *testing.T) {
 	}
 }
 
-func TestAuthSettingsRequiresPasswordAndDisablesLogin(t *testing.T) {
+func TestAuthSettingsUsesAuthenticatedSessionWithoutPassword(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestAuthSettingsRequiresPasswordAndDisablesLogin(t *testing.T) {
 	}
 	key := []byte("test-session-key")
 	server := &Server{store: store, sessionKey: key}
-	form := url.Values{"csrf_token": {"csrf-value"}, "current_password": {"password1"}, "auth_enabled": {"false"}}
+	form := url.Values{"csrf_token": {"csrf-value"}, "auth_enabled": {"false"}}
 	request := httptest.NewRequest(http.MethodPost, "/settings/auth", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.AddCookie(&http.Cookie{Name: "ctyun_session", Value: security.SignCookie(key, "authenticated")})

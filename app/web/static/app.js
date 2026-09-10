@@ -3,6 +3,29 @@ document.addEventListener("submit", (event) => {
   if (message && !window.confirm(message)) event.preventDefault();
 });
 
+const themeStorageKey = "ctyun-theme";
+const syncThemeButton = () => {
+  const button = document.querySelector("[data-theme-toggle]");
+  if (!button) return;
+  const dark = document.documentElement.dataset.theme === "dark";
+  const label = dark ? "切换到白天模式" : "切换到夜间模式";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+};
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-theme-toggle]");
+  if (!button) return;
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem(themeStorageKey, next);
+  } catch (_) {
+    // 浏览器禁用本地存储时，主题仍对当前页面有效。
+  }
+  syncThemeButton();
+});
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-password-toggle]");
   if (!button) return;
@@ -16,8 +39,12 @@ document.addEventListener("click", (event) => {
 });
 
 const syncKeepalivePeriod = (select) => {
-  const period = select?.closest(".keepalive-config")?.querySelector("[data-keepalive-period]");
+  const config = select?.closest(".keepalive-config");
+  const period = config?.querySelector("[data-keepalive-period]");
   if (period) period.hidden = select.value !== "scheduled";
+  config?.querySelectorAll("[data-keepalive-hint]").forEach((hint) => {
+    hint.hidden = hint.dataset.keepaliveHint !== select.value;
+  });
 };
 
 document.addEventListener("change", (event) => {
@@ -25,7 +52,8 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
-	document.querySelectorAll("[data-keepalive-mode]").forEach(syncKeepalivePeriod);
+  syncThemeButton();
+  document.querySelectorAll("[data-keepalive-mode]").forEach(syncKeepalivePeriod);
   const toggle = document.querySelector(".sidebar-toggle");
   const backdrop = document.querySelector(".sidebar-backdrop");
   const closeSidebar = () => {
