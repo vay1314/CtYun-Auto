@@ -117,7 +117,7 @@ func TestConnectionInfoReadyRequiresClinkProxyAddress(t *testing.T) {
 	}
 }
 
-func TestPlaceOrderUsesOfficialBatchShape(t *testing.T) {
+func TestPlaceOrderUsesOfficialClientShape(t *testing.T) {
 	tests := []struct {
 		name       string
 		reward     Reward
@@ -128,16 +128,20 @@ func TestPlaceOrderUsesOfficialBatchShape(t *testing.T) {
 		wantPoints int
 	}{
 		{
-			name: "upgrade prefers product instance", reward: Reward{ProductID: 17023101, ProductType: "pointstplupgrade", CostPoints: 500},
-			desktop: Desktop{DesktopID: "42", ProdInstID: "instance-42"}, wantKey: "prodInstId", wantValue: "instance-42", wantAttrs: 1, wantPoints: 1,
+			name: "upgrade binds desktop as official client does", reward: Reward{ProductID: 17023101, ProductType: "pointstplupgrade", CostPoints: 500},
+			desktop: Desktop{DesktopID: "42", ProdInstID: "instance-42"}, wantKey: "bindDesktopId", wantValue: "42", wantAttrs: 1, wantPoints: 1,
 		},
 		{
 			name: "upgrade falls back to desktop", reward: Reward{ProductID: 17023101, ProductType: "pointstplupgrade", CostPoints: 500},
 			desktop: Desktop{DesktopID: "42"}, wantKey: "bindDesktopId", wantValue: "42", wantAttrs: 1, wantPoints: 1,
 		},
 		{
-			name: "direct reward has no desktop attribute", reward: Reward{ProductID: 18000001, ProductType: "pointscomputer", CostPoints: 900},
-			desktop: Desktop{DesktopID: "42"}, wantAttrs: 0, wantPoints: 500,
+			name: "disk upgrade binds desktop", reward: Reward{ProductID: 17024101, ProductType: "pointsdiskupgrade", CostPoints: 1200},
+			desktop: Desktop{DesktopID: "23692156"}, wantKey: "bindDesktopId", wantValue: "23692156", wantAttrs: 1, wantPoints: 1,
+		},
+		{
+			name: "account reward binds mobile phone", reward: Reward{ProductID: 17010101, ProductType: "cpcai", CostPoints: 900, PointType: 10},
+			desktop: Desktop{DesktopID: "42"}, wantKey: "mobilephone", wantAttrs: 1, wantPoints: 10,
 		},
 	}
 	for _, tt := range tests {
@@ -165,16 +169,23 @@ func TestPlaceOrderUsesOfficialBatchShape(t *testing.T) {
 				if body.BusinessChannel != "010" || body.OrderType != 1 || body.PointType != tt.wantPoints || body.Points != tt.reward.CostPoints*2 {
 					t.Fatalf("unexpected order header: %#v", body)
 				}
-				if len(body.SKU) != 2 || body.SKU[0].ExecutionOrder != 1 || body.SKU[1].ExecutionOrder != 2 {
-					t.Fatalf("unexpected batch SKU: %#v", body.SKU)
+				if len(body.SKU) != 1 || body.SKU[0].ExecutionOrder != 1 {
+					t.Fatalf("unexpected official SKU: %#v", body.SKU)
 				}
 				for _, sku := range body.SKU {
 					if sku.OrderNum != nil || len(sku.Attributes) != tt.wantAttrs {
 						t.Fatalf("unexpected SKU: %#v", sku)
 					}
 					if tt.wantAttrs == 1 {
-						if sku.Attributes[0]["attrKey"] != tt.wantKey || fmt.Sprint(sku.Attributes[0]["attrVal"]) != tt.wantValue {
+						if sku.Attributes[0]["attrKey"] != tt.wantKey {
 							t.Fatalf("unexpected attributes: %#v", sku.Attributes)
+						}
+						if tt.wantKey == "mobilephone" {
+							if _, exists := sku.Attributes[0]["attrVal"]; exists {
+								t.Fatalf("official account entitlement omits mobilephone attrVal: %#v", sku.Attributes)
+							}
+						} else if fmt.Sprint(sku.Attributes[0]["attrVal"]) != tt.wantValue {
+							t.Fatalf("unexpected attribute value: %#v", sku.Attributes)
 						}
 					}
 				}
@@ -191,15 +202,29 @@ func TestRewardsPreserveAvailabilityFields(t *testing.T) {
 	client := NewClient("user", "password", "device-code", "")
 	client.Profile = &Profile{UserID: 11, TenantID: 22, SecretKey: "secret"}
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		body := `{"code":0,"data":[{"series":[{"description":"series","sku":[{"prodId":99,"prodName":"reward","prodType":"gift","costPoints":300,"pointType":500,"prodStatus":2,"effDate":"2026-09-01","expireDate":"2026-09-30"}]}]}]}`
+		body := `{"code":0,"data":[{"series":[{"description":"series","sku":[{"prodId":99,"prodName":"reward","prodType":"gift","costPoints":300,"pointType":500,"costPointType":10,"prodStatus":2,"effDate":"2026-09-01","expireDate":"2026-09-30"}]}]}]}`
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
 	rewards, e := client.Rewards(context.Background())
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(rewards) != 1 || rewards[0].Status != 2 || rewards[0].PointType != 500 || rewards[0].EffectiveAt != "2026-09-01" || rewards[0].ExpiresAt != "2026-09-30" || rewards[0].Description != "series" {
+	if len(rewards) != 1 || rewards[0].Status != 2 || rewards[0].PointType != 10 || rewards[0].EffectiveAt != "2026-09-01" || rewards[0].ExpiresAt != "2026-09-30" || rewards[0].Description != "series" {
 		t.Fatalf("Rewards() = %#v", rewards)
+	}
+}
+
+func TestRiskControlClassification(t *testing.T) {
+	for _, err := range []error{
+		APIError{Code: "0x08100400", Message: "blocked"},
+		fmt.Errorf("wrapped: %w", APIError{Code: 30010, Message: "你的操作已触发风控，如有疑问[0x08100400]"}),
+	} {
+		if !IsPlatformError(err) || !IsRiskControl(err) {
+			t.Fatalf("expected platform risk-control error: %v", err)
+		}
+	}
+	if IsRiskControl(APIError{Code: 30010, Message: "目标资源不存在"}) {
+		t.Fatal("ordinary platform rejection was classified as risk control")
 	}
 }
 

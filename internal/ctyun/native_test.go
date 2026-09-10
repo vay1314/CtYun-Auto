@@ -138,6 +138,18 @@ func TestNativeMarketplaceUsesNativeIdentityForWholeFlow(t *testing.T) {
 				t.Fatalf("desktop method = %s", r.Method)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"desktopList": []map[string]any{{"desktopId": "42", "desktopName": "主机", "prodInstId": "instance-42"}}}})
+		case "/selforder/api/desktop-admin/order/mgr/listOrderInstStatisticsV2":
+			var queries []struct {
+				ProductIDs   []int64 `json:"prodIds"`
+				CalendarType string  `json:"calendarType"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&queries); err != nil {
+				t.Fatal(err)
+			}
+			if len(queries) != 5 || len(queries[0].ProductIDs) != 1 || queries[0].ProductIDs[0] != 17010101 || queries[0].CalendarType != "2" || queries[4].ProductIDs[0] != 99 {
+				t.Fatalf("entitlement statistics request = %#v", queries)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"currentUser": map[string]any{"99": map[string]any{"count": 2}}}})
 		case "/selforder/api/selforder/paas/placeOrder":
 			orderCalls++
 			if r.Method != http.MethodPost {
@@ -152,12 +164,12 @@ func TestNativeMarketplaceUsesNativeIdentityForWholeFlow(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body.BusinessChannel != "010" || len(body.SKU) != 2 ||
-				body.SKU[0].Attributes[0]["attrKey"] != "prodInstId" ||
-				body.SKU[0].Attributes[0]["attrVal"] != "instance-42" {
+			if body.BusinessChannel != "010" || len(body.SKU) != 1 ||
+				body.SKU[0].Attributes[0]["attrKey"] != "bindDesktopId" ||
+				body.SKU[0].Attributes[0]["attrVal"] != "42" {
 				t.Fatalf("native order body = %#v", body)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"ok": true}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []map[string]any{{"orderId": "order-id", "orderNo": "order-no", "prodInstId": "instance-id"}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -185,8 +197,16 @@ func TestNativeMarketplaceUsesNativeIdentityForWholeFlow(t *testing.T) {
 	if err != nil || len(desktops) != 1 {
 		t.Fatalf("Desktops() = %#v, %v", desktops, err)
 	}
-	if err = client.PlaceOrder(context.Background(), rewards[0], 2, desktops[0]); err != nil {
+	count, err := client.RedemptionStatisticCount(context.Background(), rewards[0])
+	if err != nil || count != 2 {
+		t.Fatalf("RedemptionStatisticCount() = %d, %v", count, err)
+	}
+	receipt, err := client.PlaceOrder(context.Background(), rewards[0], 2, desktops[0])
+	if err != nil {
 		t.Fatal(err)
+	}
+	if receipt.OrderID != "order-id" || receipt.OrderNo != "order-no" || receipt.ProdInstID != "instance-id" {
+		t.Fatalf("PlaceOrder() receipt = %#v", receipt)
 	}
 	if orderCalls != 1 {
 		t.Fatalf("order calls = %d", orderCalls)
@@ -195,7 +215,7 @@ func TestNativeMarketplaceUsesNativeIdentityForWholeFlow(t *testing.T) {
 
 func assertNativeBaseHeaders(t *testing.T, r *http.Request) {
 	t.Helper()
-	want := map[string]string{"CTG-DEVICECODE": "device-code", "CTG-DEVICETYPE": NativeDeviceType, "CTG-VERSION": NativeVersion, "CTG-APPMODEL": NativeAppModel, "CTG-APPCHANNEL": NativeAppChannel, "CTG-DEVICE-MODEL": NativeDeviceModel}
+	want := map[string]string{"CTG-DEVICECODE": "device-code", "CTG-DEVICETYPE": NativeDeviceType, "CTG-VERSION": NativeVersion, "CTG-APPMODEL": NativeAppModel, "CTG-APPCHANNEL": NativeAppChannel, "CTG-DEVICE-MODEL": NativeDeviceModel, "CTG-ORIGINALISP": "3"}
 	for key, value := range want {
 		if got := r.Header.Get(key); got != value {
 			t.Fatalf("%s = %q, want %q", key, got, value)

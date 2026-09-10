@@ -1,13 +1,42 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vay1314/CtYun-Keeper/internal/ctyun"
 	"github.com/vay1314/CtYun-Keeper/internal/storage"
 )
+
+func TestObserveRedeemResultReportsPointsAndStatistics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/selforder/api/marketing/userPoints/getUserPoints":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []map[string]any{{"pointType": 1, "points": 800}}})
+		case "/selforder/api/desktop-admin/order/mgr/listOrderInstStatisticsV2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{"currentUser": map[string]any{"17010101": map[string]any{"count": 2}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := ctyun.NewNativeClientWithOptions("user", "password", "device", nil, ctyun.NativeOptions{
+		APIOrigin: server.URL, MarketplaceOrigin: server.URL, HTTPClient: server.Client(),
+		Now: time.Now, Random: strings.NewReader(strings.Repeat("a", 2048)),
+	})
+	client.UseProfile(ctyun.NativeProfile{UserID: 1, UserEID: "eid", TenantID: 2, SecretKey: "secret", CommonLoginReqHeader: "common"})
+	result := observeRedeemResult(context.Background(), client, ctyun.Reward{ProductID: 17010101, ProductType: "cpcai"}, 1000, 200, 1, true)
+	if !strings.Contains(result, "1000") || !strings.Contains(result, "800") || !strings.Contains(result, "1") || !strings.Contains(result, "2") {
+		t.Fatalf("verification result = %q", result)
+	}
+}
 
 func TestScheduledTaskKey(t *testing.T) {
 	if got := scheduledTaskKey("pc"); got != "usage" {

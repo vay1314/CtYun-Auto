@@ -145,6 +145,25 @@ func IsLoginExpired(err error) bool {
 	return strings.Contains(err.Error(), "当前登录信息已过期")
 }
 
+func IsPlatformError(err error) bool {
+	var apiErr APIError
+	return errors.As(err, &apiErr)
+}
+
+func IsRiskControl(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr APIError
+	if errors.As(err, &apiErr) {
+		code := strings.ToLower(strings.TrimSpace(fmt.Sprint(apiErr.Code)))
+		message := strings.ToLower(apiErr.Message)
+		return code == "0x08100400" || strings.Contains(message, "0x08100400") || strings.Contains(message, "触发风控")
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "0x08100400") || strings.Contains(message, "触发风控")
+}
+
 type Client struct {
 	Username, Password, DeviceCode, OCR string
 	HTTP                                *http.Client
@@ -521,15 +540,16 @@ func (c *Client) Rewards(ctx context.Context) ([]Reward, error) {
 		Series []struct {
 			Description string `json:"description"`
 			SKU         []struct {
-				ProductID   int64  `json:"prodId"`
-				ProductName string `json:"prodName"`
-				ProductType string `json:"prodType"`
-				Cost        int    `json:"costPoints"`
-				PointType   int    `json:"pointType"`
-				Status      int    `json:"prodStatus"`
-				Description string `json:"description"`
-				EffectiveAt any    `json:"effDate"`
-				ExpireDate  any    `json:"expireDate"`
+				ProductID     int64  `json:"prodId"`
+				ProductName   string `json:"prodName"`
+				ProductType   string `json:"prodType"`
+				Cost          int    `json:"costPoints"`
+				PointType     int    `json:"pointType"`
+				CostPointType int    `json:"costPointType"`
+				Status        int    `json:"prodStatus"`
+				Description   string `json:"description"`
+				EffectiveAt   any    `json:"effDate"`
+				ExpireDate    any    `json:"expireDate"`
 			} `json:"sku"`
 		} `json:"series"`
 	}
@@ -547,7 +567,7 @@ func (c *Client) Rewards(ctx context.Context) ([]Reward, error) {
 				}
 				out = append(out, Reward{
 					ProductID: p.ProductID, ProductName: p.ProductName, ProductType: p.ProductType,
-					Description: description, CostPoints: p.Cost, PointType: p.PointType, Status: p.Status,
+					Description: description, CostPoints: p.Cost, PointType: firstNonZero(p.CostPointType, p.PointType), Status: p.Status,
 					EffectiveAt: rewardTimeString(p.EffectiveAt), ExpiresAt: rewardTimeString(p.ExpireDate),
 				})
 			}
@@ -567,6 +587,12 @@ func rewardTimeString(value any) string {
 }
 
 func (c *Client) PlaceOrder(ctx context.Context, reward Reward, times int, desktop Desktop) error {
+	if c.Profile == nil {
+		return errors.New("客户端尚未登录")
+	}
+	if err := validateOrderTarget(reward, times, desktop); err != nil {
+		return err
+	}
 	body := buildOrderBody(reward, times, desktop)
 	var out any
 	return c.points(ctx, "POST", "/selforder/paas/placeOrder", nil, body, &out)
@@ -576,29 +602,51 @@ func buildOrderBody(reward Reward, times int, desktop Desktop) map[string]any {
 	pointType := reward.PointType
 	if pointType == 0 {
 		pointType = 1
-		if reward.ProductID >= 18000000 {
-			pointType = 500
-		}
 	}
 	attrs := []map[string]any{}
-	if reward.ProductType == "pointstplupgrade" {
-		key, value := "bindDesktopId", any(desktop.ID())
-		if desktop.ProdInstID != "" {
-			key, value = "prodInstId", desktop.ProdInstID
-		}
-		attrs = append(attrs, map[string]any{"attrKey": key, "attrVal": value})
+	if RewardNeedsDesktop(reward) {
+		attrs = append(attrs, map[string]any{"attrKey": "bindDesktopId", "attrVal": desktop.ID()})
+	} else {
+		attrs = append(attrs, map[string]any{"attrKey": "mobilephone"})
 	}
-	skus := make([]map[string]any, 0, times)
-	for i := 0; i < times; i++ {
-		skus = append(skus, map[string]any{
-			"execSort": i + 1, "prodId": reward.ProductID, "prodType": reward.ProductType, "attrs": attrs,
-		})
-	}
+	skus := []map[string]any{{"execSort": 1, "prodId": reward.ProductID, "prodType": reward.ProductType, "attrs": attrs}}
 	body := map[string]any{
 		"busiChannel": "010", "orderType": 1, "pointType": pointType,
 		"points": reward.CostPoints * times, "sku": skus,
 	}
 	return body
+}
+
+func RewardNeedsDesktop(reward Reward) bool {
+	switch reward.ProductID {
+	case 17023101, 17023111, 17024101, 17026101, 17026111:
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(reward.ProductType)) {
+	case "pointstplupgrade", "pointsdiskupgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateOrderTarget(reward Reward, times int, desktop Desktop) error {
+	if times < 1 {
+		return errors.New("兑换数量必须大于 0")
+	}
+	if RewardNeedsDesktop(reward) && strings.TrimSpace(desktop.ID()) == "" {
+		return errors.New("该商品必须选择目标云电脑")
+	}
+	return nil
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 func (c *Client) SendSMS(ctx context.Context) error {
 	h, _ := c.signed(PCVersion, false)

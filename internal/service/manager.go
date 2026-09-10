@@ -1154,8 +1154,8 @@ func (m *Manager) ValidateRedeemConfig(ctx context.Context, id int64, cfg storag
 	default:
 		return cfg, errors.New("未知的兑换计划类型")
 	}
-	if cfg.ProductID == "" || cfg.DesktopID == "" {
-		return cfg, errors.New("启用自动兑换前必须选择商品和目标云电脑")
+	if cfg.ProductID == "" {
+		return cfg, errors.New("启用自动兑换前必须选择商品")
 	}
 	return m.validateRedeemTarget(ctx, id, cfg)
 }
@@ -1165,8 +1165,8 @@ func (m *Manager) ValidateImmediateRedeem(ctx context.Context, id int64, cfg sto
 	if cfg.MaxTimes < 1 {
 		return cfg, errors.New("单次最多兑换次数必须大于 0")
 	}
-	if cfg.ProductID == "" || cfg.DesktopID == "" {
-		return cfg, errors.New("立即兑换前必须选择商品和目标云电脑")
+	if cfg.ProductID == "" {
+		return cfg, errors.New("立即兑换前必须选择商品")
 	}
 	return m.validateRedeemTarget(ctx, id, cfg)
 }
@@ -1188,18 +1188,25 @@ func (m *Manager) validateRedeemTarget(ctx context.Context, id int64, cfg storag
 	if e != nil {
 		return cfg, fmt.Errorf("读取实时兑换目录：%w", e)
 	}
-	foundReward := false
+	var selectedReward *ctyun.Reward
 	for _, reward := range rewards {
 		if strconv.FormatInt(reward.ProductID, 10) == cfg.ProductID {
 			cfg.ProductName = reward.ProductName
 			cfg.ProductType = reward.ProductType
 			cfg.CostPoints = reward.CostPoints
-			foundReward = true
+			selectedReward = &reward
 			break
 		}
 	}
-	if !foundReward {
+	if selectedReward == nil {
 		return cfg, errors.New("选择的兑换商品已下架或当前不可兑换")
+	}
+	if !ctyun.RewardNeedsDesktop(*selectedReward) {
+		cfg.DesktopID = ""
+		return cfg, nil
+	}
+	if strings.TrimSpace(cfg.DesktopID) == "" {
+		return cfg, errors.New("该商品必须选择目标云电脑")
 	}
 	for _, desktop := range desktops {
 		if desktop.ID() == cfg.DesktopID {
@@ -1266,37 +1273,93 @@ func (m *Manager) redeem(ctx context.Context, a storage.Account, c *ctyun.Native
 	if times < 1 {
 		return fmt.Errorf("积分不足：当前 %d，需要 %d", points, found.CostPoints)
 	}
-	desktops, e := c.Desktops(ctx)
-	if e != nil {
-		return fmt.Errorf("兑换前验证云电脑：%w", e)
-	}
-	var desktop *ctyun.Desktop
-	for i := range desktops {
-		if desktops[i].ID() == cfg.DesktopID {
-			desktop = &desktops[i]
-			break
+	desktop := &ctyun.Desktop{}
+	if ctyun.RewardNeedsDesktop(*found) {
+		desktops, desktopErr := c.Desktops(ctx)
+		if desktopErr != nil {
+			return fmt.Errorf("兑换前验证云电脑：%w", desktopErr)
+		}
+		desktop = nil
+		for i := range desktops {
+			if desktops[i].ID() == cfg.DesktopID {
+				desktop = &desktops[i]
+				break
+			}
+		}
+		if desktop == nil {
+			return errors.New("配置的目标云电脑已不存在或不属于当前账号")
 		}
 	}
-	if desktop == nil {
-		return errors.New("配置的目标云电脑已不存在或不属于当前账号")
+	beforeStatistic, statisticSnapshotErr := c.RedemptionStatisticCount(ctx, *found)
+	if statisticSnapshotErr != nil {
+		l.Printf("兑换前统计读取失败，不影响平台下单结果：%v", statisticSnapshotErr)
 	}
 	pointsSpent := found.CostPoints * times
 	_, e = m.store.DB.Exec(`INSERT INTO redeem_states(account_id,last_attempt_date,last_attempt_status,last_redeem_times,last_points_spent,message,updated_at) VALUES(?,?,'pending',?,?,'订单提交中',?) ON CONFLICT(account_id) DO UPDATE SET last_attempt_date=excluded.last_attempt_date,last_attempt_status='pending',last_redeem_times=excluded.last_redeem_times,last_points_spent=excluded.last_points_spent,message='订单提交中',updated_at=excluded.updated_at`, a.ID, today, times, pointsSpent, storage.Now())
 	if e != nil {
 		return e
 	}
-	l.Printf("兑换前复核：%s，%d 次，预计 %d 积分", found.ProductName, times, pointsSpent)
-	e = c.PlaceOrder(ctx, *found, times, *desktop)
+	if ctyun.RewardNeedsDesktop(*found) {
+		l.Printf("兑换前复核：%s，目标云电脑 %s，数量 %d，预计 %d 积分", found.ProductName, desktop.Name(), times, pointsSpent)
+	} else {
+		l.Printf("兑换前复核：%s，数量 %d，预计 %d 积分", found.ProductName, times, pointsSpent)
+	}
+	receipt, orderErr := c.PlaceOrder(ctx, *found, times, *desktop)
+	e = orderErr
 	status := "success"
 	msg := "兑换成功"
 	if e != nil {
-		status = "pending"
-		msg = "订单结果不确定：" + e.Error()
+		if ctyun.IsPlatformError(e) {
+			status = "failed"
+			msg = "兑换失败：" + e.Error()
+			if ctyun.IsRiskControl(e) {
+				msg += "；已自动关闭后续自动兑换"
+				_, _ = m.store.DB.Exec("UPDATE redeem_configs SET enabled=0,updated_at=? WHERE account_id=?", storage.Now(), a.ID)
+				l.Printf("检测到平台风控，已关闭该账号的自动兑换，请勿反复提交；如需恢复，请先联系平台管理员确认")
+			}
+		} else {
+			status = "pending"
+			msg = "订单结果不确定：" + e.Error()
+		}
 	} else {
-		l.Printf("兑换成功")
+		reference := receipt.Reference()
+		if reference != "" {
+			l.Printf("平台返回下单成功：%s，正在辅助核对积分和兑换统计", reference)
+		} else {
+			l.Printf("平台返回下单成功（code=0），正在辅助核对积分和兑换统计")
+		}
+		observation := observeRedeemResult(ctx, c, *found, points, pointsSpent, beforeStatistic, statisticSnapshotErr == nil)
+		if reference != "" {
+			msg = fmt.Sprintf("兑换成功（订单 %s；%s）", reference, observation)
+		} else {
+			msg = fmt.Sprintf("兑换成功（平台返回 code=0；%s）", observation)
+		}
+		l.Printf("%s", msg)
 	}
 	_, stateErr := m.store.DB.Exec(`UPDATE redeem_states SET last_attempt_status=?,last_success_date=CASE WHEN ?='success' THEN ? ELSE last_success_date END,last_redeem_times=?,last_points_spent=?,message=?,updated_at=? WHERE account_id=?`, status, status, today, times, pointsSpent, msg, storage.Now(), a.ID)
 	return errors.Join(e, stateErr)
+}
+
+func observeRedeemResult(ctx context.Context, c *ctyun.NativeClient, reward ctyun.Reward, pointsBefore, pointsSpent, statisticBefore int, hasStatisticSnapshot bool) string {
+	observations := make([]string, 0, 2)
+	pointsAfter, pointsErr := c.Points(ctx)
+	if pointsErr != nil {
+		observations = append(observations, "积分复查失败，不影响 code=0 的成功结果")
+	} else if pointsAfter <= pointsBefore-pointsSpent {
+		observations = append(observations, fmt.Sprintf("积分已由 %d 扣减至 %d", pointsBefore, pointsAfter))
+	} else {
+		observations = append(observations, fmt.Sprintf("积分数据暂未同步（当前 %d）", pointsAfter))
+	}
+
+	statisticAfter, statisticErr := c.RedemptionStatisticCount(ctx, reward)
+	if statisticErr != nil {
+		observations = append(observations, "兑换统计复查失败")
+	} else if hasStatisticSnapshot && statisticAfter > statisticBefore {
+		observations = append(observations, fmt.Sprintf("兑换统计已由 %d 增至 %d", statisticBefore, statisticAfter))
+	} else {
+		observations = append(observations, "兑换统计暂未变化")
+	}
+	return strings.Join(observations, "；")
 }
 func (m *Manager) BeginVerification(ctx context.Context, id int64) (bool, error) {
 	a, e := m.store.Account(id)

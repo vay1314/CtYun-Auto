@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	NativeVersion     = "204010005"
+	NativeVersion     = "204010003"
 	NativeAppVersion  = "4.1.0.656"
 	NativeDeviceType  = "25"
 	NativeAppModel    = "2"
@@ -43,6 +43,22 @@ type NativeProfile struct {
 	MobilePhone          string        `json:"mobilephone"`
 	BondedDevice         bool          `json:"bondedDevice"`
 	Offset               time.Duration `json:"offset"`
+}
+
+type OrderReceipt struct {
+	OrderID    string `json:"orderId"`
+	OrderNo    string `json:"orderNo"`
+	ProdInstID string `json:"prodInstId"`
+}
+
+func (r OrderReceipt) Reference() string {
+	if strings.TrimSpace(r.OrderNo) != "" {
+		return r.OrderNo
+	}
+	if strings.TrimSpace(r.OrderID) != "" {
+		return r.OrderID
+	}
+	return r.ProdInstID
 }
 
 type NativeOptions struct {
@@ -154,6 +170,7 @@ func (c *NativeClient) baseHeaders() (http.Header, string, string, error) {
 	h.Set("CTG-APPMODEL", NativeAppModel)
 	h.Set("CTG-APPCHANNEL", NativeAppChannel)
 	h.Set("CTG-DEVICE-MODEL", NativeDeviceModel)
+	h.Set("CTG-ORIGINALISP", "3")
 	h.Set("x-random", randomValue)
 	h.Set("x-product-id", "7")
 	h.Set("x-client-trace-id", traceID)
@@ -381,8 +398,16 @@ func (c *NativeClient) marketplace(ctx context.Context, method, path string, que
 	}
 	headers.Set("Cache-Control", "no-cache")
 	headers.Set("Pragma", "no-cache")
+	headers.Set("Accept", "application/json, text/plain, */*")
+	headers.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	headers.Set("Content-Type", "application/json")
 	headers.Set("From", "App-web")
+	headers.Set("Origin", "https://desk.ctyun.cn")
+	headers.Set("Referer", "https://desk.ctyun.cn/selforder/points.html")
+	headers.Set("Sec-CH-UA", `"Not(A:Brand";v="24", "Chromium";v="122"`)
+	headers.Set("Sec-CH-UA-Mobile", "?0")
+	headers.Set("Sec-CH-UA-Platform", `"Windows"`)
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.2; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/6.8.0 Chrome/122.0.6261.171 Safari/537.36")
 	headers.Set("x-lang", "zh-CN")
 	endpoint := c.marketplaceOrigin + path
 	if len(query) > 0 {
@@ -421,15 +446,16 @@ func (c *NativeClient) Rewards(ctx context.Context) ([]Reward, error) {
 		Series []struct {
 			Description string `json:"description"`
 			SKU         []struct {
-				ProductID   int64  `json:"prodId"`
-				ProductName string `json:"prodName"`
-				ProductType string `json:"prodType"`
-				Cost        int    `json:"costPoints"`
-				PointType   int    `json:"pointType"`
-				Status      int    `json:"prodStatus"`
-				Description string `json:"description"`
-				EffectiveAt any    `json:"effDate"`
-				ExpireDate  any    `json:"expireDate"`
+				ProductID     int64  `json:"prodId"`
+				ProductName   string `json:"prodName"`
+				ProductType   string `json:"prodType"`
+				Cost          int    `json:"costPoints"`
+				PointType     int    `json:"pointType"`
+				CostPointType int    `json:"costPointType"`
+				Status        int    `json:"prodStatus"`
+				Description   string `json:"description"`
+				EffectiveAt   any    `json:"effDate"`
+				ExpireDate    any    `json:"expireDate"`
 			} `json:"sku"`
 		} `json:"series"`
 	}
@@ -446,7 +472,7 @@ func (c *NativeClient) Rewards(ctx context.Context) ([]Reward, error) {
 				}
 				out = append(out, Reward{
 					ProductID: sku.ProductID, ProductName: sku.ProductName, ProductType: sku.ProductType,
-					Description: description, CostPoints: sku.Cost, PointType: sku.PointType, Status: sku.Status,
+					Description: description, CostPoints: sku.Cost, PointType: firstNonZero(sku.CostPointType, sku.PointType), Status: sku.Status,
 					EffectiveAt: rewardTimeString(sku.EffectiveAt), ExpiresAt: rewardTimeString(sku.ExpireDate),
 				})
 			}
@@ -473,8 +499,54 @@ func (c *NativeClient) Desktops(ctx context.Context) ([]Desktop, error) {
 	return out, nil
 }
 
-func (c *NativeClient) PlaceOrder(ctx context.Context, reward Reward, times int, desktop Desktop) error {
-	return c.marketplace(ctx, http.MethodPost, "/selforder/api/selforder/paas/placeOrder", nil, buildOrderBody(reward, times, desktop), nil)
+func (c *NativeClient) RedemptionStatisticCount(ctx context.Context, reward Reward) (int, error) {
+	queries := []map[string]any{
+		{"prodIds": []int64{17010101}, "calendarType": "2"},
+		{"prodIds": []int64{17023101}},
+		{"prodIds": []int64{17023111}},
+		{"prodIds": []int64{17024101}},
+	}
+	found := false
+	for _, query := range queries {
+		for _, productID := range query["prodIds"].([]int64) {
+			if productID == reward.ProductID {
+				found = true
+			}
+		}
+	}
+	if !found {
+		query := map[string]any{"prodIds": []int64{reward.ProductID}}
+		if strings.EqualFold(strings.TrimSpace(reward.ProductType), "cpcai") {
+			query["calendarType"] = "2"
+		}
+		queries = append(queries, query)
+	}
+	var out struct {
+		CurrentUser map[string]struct {
+			Count int `json:"count"`
+		} `json:"currentUser"`
+	}
+	if err := c.marketplace(ctx, http.MethodPost, "/selforder/api/desktop-admin/order/mgr/listOrderInstStatisticsV2", nil, queries, &out); err != nil {
+		return 0, err
+	}
+	return out.CurrentUser[strconv.FormatInt(reward.ProductID, 10)].Count, nil
+}
+
+func (c *NativeClient) PlaceOrder(ctx context.Context, reward Reward, times int, desktop Desktop) (OrderReceipt, error) {
+	if _, ok := c.Profile(); !ok {
+		return OrderReceipt{}, errors.New("原生客户端尚未登录")
+	}
+	if err := validateOrderTarget(reward, times, desktop); err != nil {
+		return OrderReceipt{}, err
+	}
+	var receipts []OrderReceipt
+	if err := c.marketplace(ctx, http.MethodPost, "/selforder/api/selforder/paas/placeOrder", nil, buildOrderBody(reward, times, desktop), &receipts); err != nil {
+		return OrderReceipt{}, err
+	}
+	if len(receipts) == 0 {
+		return OrderReceipt{}, nil
+	}
+	return receipts[0], nil
 }
 
 func nativeSHA(value string) string {
