@@ -46,6 +46,9 @@ type Manager struct {
 	logFile       *os.File
 	logMu         sync.Mutex
 	logCloseOnce  sync.Once
+	wg            sync.WaitGroup
+	launchMu      sync.Mutex
+	closing       bool
 	mu            sync.RWMutex
 	clients       map[int64]*clientState
 	nativeClients map[int64]*ctyun.NativeClient
@@ -55,6 +58,7 @@ type Manager struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	started       time.Time
+	maintenance   bool
 }
 
 func New(store *storage.Store, key []byte, dataDir, ocr string) *Manager {
@@ -66,10 +70,13 @@ func New(store *storage.Store, key []byte, dataDir, ocr string) *Manager {
 func (m *Manager) Start() {
 	m.RestartKeepalive()
 	_ = m.CleanupExpiredLogs()
-	go m.scheduler()
+	m.launch(m.scheduler)
 }
 func (m *Manager) Close() {
 	m.cancel()
+	m.launchMu.Lock()
+	m.closing = true
+	m.launchMu.Unlock()
 	m.mu.Lock()
 	for _, c := range m.clients {
 		if c.cancel != nil {
@@ -80,11 +87,26 @@ func (m *Manager) Close() {
 		r.cancel()
 	}
 	m.mu.Unlock()
+	m.wg.Wait()
 	m.logCloseOnce.Do(func() {
 		if m.logFile != nil {
 			_ = m.logFile.Close()
 		}
 	})
+}
+
+func (m *Manager) launch(fn func()) {
+	m.launchMu.Lock()
+	if m.closing {
+		m.launchMu.Unlock()
+		return
+	}
+	m.wg.Add(1)
+	m.launchMu.Unlock()
+	go func() {
+		defer m.wg.Done()
+		fn()
+	}()
 }
 func (m *Manager) Started() time.Time { return m.started }
 func (m *Manager) logf(format string, v ...any) {
@@ -402,12 +424,16 @@ func (m *Manager) reconcileKeepalive(now time.Time) {
 func (m *Manager) reconcileAccountKeepalive(a storage.Account, now time.Time) {
 	want := a.DeviceStatus != "pending" && a.KeepaliveActiveAt(now)
 	m.mu.RLock()
+	if m.maintenance {
+		m.mu.RUnlock()
+		return
+	}
 	state := m.clients[a.ID]
 	running := state != nil && state.ctx != nil && state.ctx.Err() == nil
 	usageActive := m.accountUsageActiveLocked(a.ID)
 	m.mu.RUnlock()
 	if want && !running {
-		go m.startAccount(a)
+		m.launch(func() { m.startAccount(a) })
 		return
 	}
 	if !want && running && usageActive {
@@ -547,7 +573,8 @@ func (m *Manager) startAccount(a storage.Account) {
 		if e := c.ReportDesktopLogin(ctx, d); e != nil {
 			m.logf("[%s/%s] 登录事件上报失败，将继续使用桌面握手：%v", a.Name, d.Name(), e)
 		}
-		go func(desktop ctyun.Desktop, info ctyun.ConnectionInfo) {
+		m.launch(func() {
+			desktop, info := d, info
 			name := desktop.Name()
 			refresh := func(refreshCtx context.Context) (ctyun.ConnectionInfo, error) {
 				return waitForConnectionInfo(refreshCtx, c, desktop, nil, 30*time.Second)
@@ -556,7 +583,7 @@ func (m *Manager) startAccount(a storage.Account) {
 			if e != nil && !errors.Is(e, context.Canceled) {
 				m.logf("[%s/%s] 保活结束：%v", a.Name, name, e)
 			}
-		}(d, info)
+		})
 	}
 	if ctx.Err() != nil {
 		return
@@ -747,7 +774,7 @@ func statusUpdatedToday(value string, now time.Time) bool {
 	return updated.Year() == now.Year() && updated.YearDay() == now.YearDay()
 }
 
-func (m *Manager) startScheduledTask(a storage.Account, typ string, now time.Time) {
+func (m *Manager) startScheduledTask(a storage.Account, typ string, now time.Time, claimKey string) {
 	// Query first so a second Cron time or a service restart does not repeat a
 	// task which the platform has already credited today. If the query itself
 	// fails, still run the task and let its own login recovery handle it.
@@ -761,8 +788,11 @@ func (m *Manager) startScheduledTask(a storage.Account, typ string, now time.Tim
 			return
 		}
 	}
-	if _, e = m.StartTask(a.ID, typ, "schedule"); e != nil && !strings.Contains(e.Error(), "已在运行") {
-		m.logf("[%s] 启动定时任务失败：%v", a.Name, e)
+	if _, e = m.StartTask(a.ID, typ, "schedule"); e != nil {
+		if !strings.Contains(e.Error(), "已在运行") {
+			_ = m.store.ReleaseClaim(a.ID, typ, claimKey)
+			m.logf("[%s] 启动定时任务失败：%v", a.Name, e)
+		}
 	}
 }
 
@@ -844,6 +874,10 @@ func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
 	}
 	key := fmt.Sprintf("%d:%s", id, typ)
 	m.mu.Lock()
+	if m.maintenance {
+		m.mu.Unlock()
+		return 0, errors.New("系统正在准备更新，暂不接受新任务")
+	}
 	if _, ok := m.starting[key]; ok {
 		m.mu.Unlock()
 		return 0, errors.New("该任务已在运行")
@@ -869,9 +903,15 @@ func (m *Manager) StartTask(id int64, typ, trigger string) (int64, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.mu.Lock()
 	delete(m.starting, key)
+	if m.maintenance {
+		m.mu.Unlock()
+		cancel()
+		_ = m.store.UpdateRun(runID, "interrupted", "系统正在准备更新")
+		return 0, errors.New("系统正在准备更新，暂不接受新任务")
+	}
 	m.active[runID] = running{cancel: cancel, typ: key, accountID: id}
 	m.mu.Unlock()
-	go m.run(ctx, cancel, runID, id, typ, trigger, path)
+	m.launch(func() { m.run(ctx, cancel, runID, id, typ, trigger, path) })
 	return runID, nil
 }
 func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, runID, accountID int64, typ, trigger, path string) {
@@ -1134,14 +1174,14 @@ func (m *Manager) runUsage(ctx context.Context, a storage.Account, c *ctyun.Clie
 			return waitForConnectionInfo(refreshCtx, c, desktop, nil, 30*time.Second)
 		}
 		profile := *c.Profile
-		go func() {
+		m.launch(func() {
 			connectionErr <- ctyun.RunClink(temporaryCtx, info, profile, a.DeviceCode, refresh, func(status string) {
 				l.Printf("%s：%s", desktop.Name(), status)
 				if strings.Contains(status, "桌面登录会话已激活") {
 					activatedOnce.Do(func() { close(activated) })
 				}
 			})
-		}()
+		})
 		l.Printf("已启动临时时长连接，完成每日 1 小时任务后将自动断开")
 		select {
 		case <-ctx.Done():
@@ -1180,6 +1220,135 @@ func (m *Manager) RunningAccountCount() int {
 		}
 	}
 	return count
+}
+
+// BlockingForUpdate returns labels for tasks that should prevent an in-place
+// update, plus any redeem order whose result is still unknown.
+func (m *Manager) BlockingForUpdate() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	labels := map[string]string{
+		"login":  "登录任务",
+		"chat":   "AI 对话任务",
+		"pc":     "时长任务",
+		"redeem": "兑换任务",
+	}
+	seen := map[string]bool{}
+	var blocks []string
+	for _, v := range m.active {
+		typ := v.typ
+		if i := strings.LastIndexByte(typ, ':'); i >= 0 {
+			typ = typ[i+1:]
+		}
+		if label, ok := labels[typ]; ok && !seen[typ] {
+			blocks = append(blocks, label)
+			seen[typ] = true
+		}
+	}
+	if pending, _ := m.store.HasPendingRedeem(); pending {
+		blocks = append(blocks, "存在结果不确定的兑换订单")
+	}
+	return blocks
+}
+
+// PrepareForUpdate prevents new jobs, stops background keepalive connections,
+// waits for short jobs and rejects updates while usage/redeem work is active.
+func (m *Manager) PrepareForUpdate(ctx context.Context) error {
+	m.mu.Lock()
+	if m.maintenance {
+		m.mu.Unlock()
+		return errors.New("系统已处于更新维护状态")
+	}
+	m.maintenance = true
+	m.mu.Unlock()
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		m.mu.RLock()
+		var shortRunning bool
+		var blocking string
+		shortRunning = len(m.starting) > 0
+		for _, item := range m.active {
+			typ := item.typ
+			if index := strings.LastIndexByte(typ, ':'); index >= 0 {
+				typ = typ[index+1:]
+			}
+			switch typ {
+			case "pc":
+				blocking = "时长任务正在运行"
+			case "redeem":
+				blocking = "兑换任务正在运行"
+			case "login", "chat":
+				shortRunning = true
+			}
+		}
+		m.mu.RUnlock()
+		if blocking != "" {
+			m.CancelUpdateMaintenance()
+			return errors.New(blocking)
+		}
+		if pending, err := m.store.HasPendingRedeem(); err != nil {
+			m.CancelUpdateMaintenance()
+			return err
+		} else if pending {
+			m.CancelUpdateMaintenance()
+			return errors.New("存在结果不确定的兑换订单")
+		}
+		if !shortRunning {
+			m.mu.Lock()
+			for _, state := range m.clients {
+				if state != nil && state.cancel != nil {
+					state.cancel()
+				}
+			}
+			m.mu.Unlock()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			m.CancelUpdateMaintenance()
+			return fmt.Errorf("等待短任务结束: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) CheckUpdateBlockers() error {
+	m.mu.RLock()
+	blocked := false
+	for key := range m.starting {
+		blocked = blocked || strings.HasSuffix(key, ":pc") || strings.HasSuffix(key, ":redeem")
+	}
+	for _, task := range m.active {
+		blocked = blocked || strings.HasSuffix(task.typ, ":pc") || strings.HasSuffix(task.typ, ":redeem")
+	}
+	m.mu.RUnlock()
+	if blocked {
+		return errors.New("时长或兑换任务正在运行，请完成后重试")
+	}
+	pending, err := m.store.HasPendingRedeem()
+	if err != nil {
+		return err
+	}
+	if pending {
+		return errors.New("存在结果不确定的兑换订单")
+	}
+	return nil
+}
+
+func (m *Manager) CancelUpdateMaintenance() {
+	m.mu.Lock()
+	wasMaintenance := m.maintenance
+	m.maintenance = false
+	m.mu.Unlock()
+	if wasMaintenance && m.ctx.Err() == nil {
+		m.reconcileKeepalive(time.Now())
+	}
+}
+
+func (m *Manager) SchedulerHealthy() bool {
+	return m.ctx.Err() == nil
 }
 
 func (m *Manager) RedeemCatalog(ctx context.Context, id int64) ([]ctyun.Reward, []ctyun.Desktop, error) {
@@ -1526,16 +1695,26 @@ func (m *Manager) scheduler() {
 					prev := s.Next(now.Add(-time.Minute - time.Second))
 					if !prev.After(now) {
 						minute := now.Format("200601021504")
-						if m.store.Claim(a.ID, x.typ, minute) {
+						m.mu.RLock()
+						maintenance := m.maintenance
+						m.mu.RUnlock()
+						if !maintenance && m.store.Claim(a.ID, x.typ, minute) {
 							a := a
-							go m.startScheduledTask(a, x.typ, now)
+							m.launch(func() { m.startScheduledTask(a, x.typ, now, minute) })
 						}
 					}
 				}
 				if now.Hour() == 6 && now.Minute() == 5 {
 					cfg, _ := m.store.Redeem(a.ID)
-					if cfg.Enabled && m.redeemDue(a.ID, cfg, now) && m.store.Claim(a.ID, "redeem", now.Format("20060102")) {
-						_, _ = m.StartTask(a.ID, "redeem", "schedule")
+					claimKey := now.Format("20060102")
+					m.mu.RLock()
+					maintenance := m.maintenance
+					m.mu.RUnlock()
+					if cfg.Enabled && !maintenance && m.redeemDue(a.ID, cfg, now) && m.store.Claim(a.ID, "redeem", claimKey) {
+						if _, err := m.StartTask(a.ID, "redeem", "schedule"); err != nil && !strings.Contains(err.Error(), "已在运行") {
+							_ = m.store.ReleaseClaim(a.ID, "redeem", claimKey)
+							m.logf("[%s] 启动定时兑换失败：%v", a.Name, err)
+						}
 					}
 				}
 			}

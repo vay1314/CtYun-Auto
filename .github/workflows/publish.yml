@@ -2,6 +2,24 @@ name: Build and publish CtYunKeeper
 
 on:
   workflow_dispatch:
+    inputs:
+      allow_republish:
+        description: Explicitly replace assets for an existing release at the same commit
+        type: boolean
+        default: false
+      minimum_app_version:
+        description: Minimum version eligible for online update
+        required: false
+        default: "2.0.0"
+      requires_image_update:
+        description: Docker users must pull a new image
+        type: boolean
+        required: true
+        default: false
+      notes:
+        description: Short update notes
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -12,74 +30,202 @@ concurrency:
 
 jobs:
   prepare:
-    name: Read project version
+    name: Validate version and signing key
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      image: ${{ steps.image.outputs.name }}
-
+      version: ${{ steps.info.outputs.version }}
+      image: ${{ steps.info.outputs.image }}
+      public_key: ${{ steps.info.outputs.public_key }}
+      build_time: ${{ steps.info.outputs.build_time }}
+      launcher_version: ${{ steps.info.outputs.launcher_version }}
+      requires_image_update: ${{ steps.compat.outputs.requires_image_update }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Read project version
-        id: version
-        shell: bash
-        run: |
-          version="$(tr -d '[:space:]' < VERSION)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "VERSION must use the X.Y.Z format" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
-      - name: Set Docker image name
-        id: image
+      - name: Validate release inputs
+        id: info
         shell: bash
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          MINIMUM_APP_VERSION: ${{ inputs.minimum_app_version }}
         run: |
-          if [[ -z "$DOCKERHUB_USERNAME" ]]; then
-            echo "Repository variable DOCKERHUB_USERNAME is not configured" >&2
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          launcher_version="$(tr -d '[:space:]' < LAUNCHER_VERSION)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must use X.Y.Z" >&2; exit 1; }
+          [[ "$launcher_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "LAUNCHER_VERSION must use X.Y.Z" >&2; exit 1; }
+          [[ "$MINIMUM_APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "minimum_app_version must use X.Y.Z" >&2; exit 1; }
+          [[ -n "$DOCKERHUB_USERNAME" ]] || { echo "DOCKERHUB_USERNAME is not configured" >&2; exit 1; }
+          [[ -n "$UPDATE_SIGNING_PRIVATE_KEY" ]] || { echo "UPDATE_SIGNING_PRIVATE_KEY is not configured" >&2; exit 1; }
+          public_key="$(go run ./cmd/ctyun-update-tool public-key)"
+          {
+            echo "version=$version"
+            echo "image=${DOCKERHUB_USERNAME,,}/ctyun-keeper"
+            echo "public_key=$public_key"
+            echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "launcher_version=$launcher_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse release replacement from another commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.info.outputs.version }}
+          ALLOW_REPUBLISH: ${{ inputs.allow_republish }}
+        run: |
+          set -euo pipefail
+          tag_lines="$(git ls-remote origin "refs/tags/v${VERSION}" "refs/tags/v${VERSION}^{}")"
+          if [[ -n "$tag_lines" ]]; then
+            tag_commit="$(printf '%s\n' "$tag_lines" | awk '/\^\{\}$/ {print $1; found=1} END {if (!found) print first} NR==1 {first=$1}')"
+            if [[ "$tag_commit" != "${GITHUB_SHA}" ]]; then
+              echo "tag v${VERSION} already points to ${tag_commit}; refusing ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+          fi
+          release_error="$(mktemp)"
+          if existing="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq .id 2>"$release_error")"; then
+            :
+          elif grep -q '(HTTP 404)' "$release_error"; then
+            existing=""
+          else
+            cat "$release_error" >&2
+            rm -f "$release_error"
+            echo "Unable to verify whether Release v${VERSION} already exists" >&2
             exit 1
           fi
-          echo "name=${DOCKERHUB_USERNAME,,}/ctyun-keeper" >> "$GITHUB_OUTPUT"
+          rm -f "$release_error"
+          if [[ -n "$existing" && "$ALLOW_REPUBLISH" != true ]]; then
+            echo "Release exists; explicitly enable allow_republish to replace it" >&2
+            exit 1
+          fi
+          if [[ -n "$existing" && -z "$tag_lines" ]]; then
+            echo "Release v${VERSION} exists without a verifiable tag; refusing to replace it" >&2
+            exit 1
+          fi
+
+      - name: Detect container runtime changes
+        id: compat
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.requires_image_update }}
+        run: |
+          set -euo pipefail
+          required="$REQUESTED"
+          previous="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [[ -z "$previous" ]] || ! git rev-parse "$previous" >/dev/null 2>&1; then
+            required=true
+          elif ! git diff --quiet "$previous" HEAD -- app/Dockerfile app/docker-entrypoint.sh cmd/ctyun-keeper-launcher internal/update go.mod go.sum LAUNCHER_VERSION; then
+            required=true
+          fi
+          echo "requires_image_update=$required" >> "$GITHUB_OUTPUT"
+
+  tests:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
+  packages:
+    name: Package ${{ matrix.os }}-${{ matrix.arch }}
+    needs: [prepare, tests]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows, linux]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build package
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PUBLIC_KEY: ${{ needs.prepare.outputs.public_key }}
+          BUILD_TIME: ${{ needs.prepare.outputs.build_time }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          folder="CtYunKeeper-v${VERSION}-${TARGET_OS}-${TARGET_ARCH}"
+          root="dist/${folder}"
+          mkdir -p "$root/static"
+          cp -R app/web/static/. "$root/static/"
+          ext=""
+          [[ "$TARGET_OS" == windows ]] && ext=".exe"
+          CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.buildTime=${BUILD_TIME} -X main.updatePublicKey=${PUBLIC_KEY}" \
+            -o "$root/ctyun-keeper${ext}" ./cmd/ctyun-keeper
+          if [[ "$TARGET_OS" == windows ]]; then
+            CGO_ENABLED=0 GOOS=windows GOARCH="$TARGET_ARCH" \
+              go build -trimpath -ldflags="-s -w -X main.updatePublicKey=${PUBLIC_KEY}" -o "$root/ctyun-keeper-updater.exe" ./cmd/ctyun-keeper-updater
+            cp packaging/windows/config.env "$root/config.env"
+            cp packaging/windows/config.env "$root/config.env.example"
+            cp packaging/windows/start.bat "$root/start.bat"
+            cp packaging/windows/README.txt "$root/README.txt"
+          fi
+          go run ./cmd/ctyun-update-tool package-manifest \
+            --root "$root" --version "$VERSION" --platform "${TARGET_OS}-${TARGET_ARCH}"
+          if [[ "$TARGET_OS" == windows ]]; then
+            (cd dist && zip -qr "${folder}.zip" "$folder")
+          else
+            chmod 0755 "$root/ctyun-keeper"
+            tar -C dist -czf "dist/${folder}.tar.gz" "$folder"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.${{ matrix.os == 'windows' && 'zip' || 'tar.gz' }}
+          if-no-files-found: error
+          retention-days: 7
 
   docker:
-    name: Build and push Docker image
-    needs: prepare
+    name: Build immutable Docker candidate
+    needs: [prepare, tests]
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Generate image metadata
+      - uses: docker/metadata-action@v5
         id: meta
-        uses: docker/metadata-action@v5
         with:
           images: ${{ needs.prepare.outputs.image }}
           tags: |
-            type=raw,value=latest
-            type=raw,value=v${{ needs.prepare.outputs.version }}
+            type=raw,value=candidate-${{ github.sha }}
           labels: |
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: ./app/Dockerfile
@@ -87,6 +233,10 @@ jobs:
           push: true
           build-args: |
             APP_VERSION=${{ needs.prepare.outputs.version }}
+            APP_COMMIT=${{ github.sha }}
+            APP_BUILD_TIME=${{ needs.prepare.outputs.build_time }}
+            UPDATE_PUBLIC_KEY=${{ needs.prepare.outputs.public_key }}
+            LAUNCHER_VERSION=${{ needs.prepare.outputs.launcher_version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -94,83 +244,68 @@ jobs:
           provenance: mode=max
           sbom: true
 
-  windows:
-    name: Build Windows ${{ matrix.goarch }}
-    needs: prepare
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goarch:
-          - amd64
-          - arm64
-
+  release:
+    name: Sign manifest and publish release
+    needs: [prepare, packages, docker]
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Test
-        shell: pwsh
-        run: go test ./...
-
-      - name: Build and package
-        shell: pwsh
-        env:
-          APP_VERSION: ${{ needs.prepare.outputs.version }}
-          TARGET_ARCH: ${{ matrix.goarch }}
-        run: |
-          $folderName = "CtYunKeeper-v$env:APP_VERSION-windows-$env:TARGET_ARCH"
-          $folder = Join-Path dist $folderName
-          New-Item -ItemType Directory -Force -Path $folder | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $folder 'data') | Out-Null
-          $env:CGO_ENABLED = '0'
-          $env:GOOS = 'windows'
-          $env:GOARCH = $env:TARGET_ARCH
-          go build -trimpath -ldflags "-s -w -X main.version=$env:APP_VERSION" -o (Join-Path $folder 'ctyun-keeper.exe') ./cmd/ctyun-keeper
-          Copy-Item -Recurse app/web/static (Join-Path $folder 'static')
-          Copy-Item packaging/windows/config.env (Join-Path $folder 'config.env')
-          Copy-Item packaging/windows/start.bat (Join-Path $folder 'start.bat')
-          Copy-Item packaging/windows/README.txt (Join-Path $folder 'README.txt')
-          Compress-Archive -Path $folder -DestinationPath (Join-Path dist "$folderName.zip") -CompressionLevel Optimal
-
-      - name: Upload packaged program
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: CtYunKeeper-windows-${{ matrix.goarch }}
-          path: dist/*.zip
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish GitHub Release
-    needs:
-      - prepare
-      - docker
-      - windows
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download Windows packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: CtYunKeeper-windows-*
+          pattern: package-*
           path: dist
           merge-multiple: true
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v3
+      - name: Generate signed update manifest
+        shell: bash
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MINIMUM_APP_VERSION: ${{ inputs.minimum_app_version }}
+          REQUIRES_IMAGE_UPDATE: ${{ needs.prepare.outputs.requires_image_update }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/ctyun-update-tool release-manifest \
+            --dist dist --version "$VERSION" --repository "$GITHUB_REPOSITORY" \
+            --minimum-app "$MINIMUM_APP_VERSION" --minimum-launcher "${{ needs.prepare.outputs.launcher_version }}" \
+            --requires-image-update="$REQUIRES_IMAGE_UPDATE" --notes "$NOTES"
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
           target_commitish: ${{ github.sha }}
           name: CtYunKeeper v${{ needs.prepare.outputs.version }}
           generate_release_notes: true
           overwrite_files: true
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/update-manifest.json
+            dist/update-manifest.sig
           fail_on_unmatched_files: true
 
+  docker-publish:
+    name: Publish Docker image after signed release
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Promote the verified candidate
+        shell: bash
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:v${VERSION}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:candidate-${GITHUB_SHA}"

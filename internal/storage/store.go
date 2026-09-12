@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -145,8 +147,15 @@ CREATE TABLE IF NOT EXISTS account_auth_cache(account_id INTEGER PRIMARY KEY REF
 CREATE TABLE IF NOT EXISTS account_native_auth_cache(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,login_info_encrypted TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS redeem_configs(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,enabled INTEGER NOT NULL DEFAULT 0,product_id TEXT NOT NULL DEFAULT '',product_name TEXT NOT NULL DEFAULT '',product_type TEXT NOT NULL DEFAULT '',desktop_id TEXT NOT NULL DEFAULT '',cost_points INTEGER NOT NULL DEFAULT 0,max_times INTEGER NOT NULL DEFAULT 1,schedule_type TEXT NOT NULL DEFAULT 'daily',interval_days INTEGER NOT NULL DEFAULT 1,monthly_days TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS redeem_states(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,last_attempt_date TEXT NOT NULL DEFAULT '',last_attempt_status TEXT NOT NULL DEFAULT '',last_success_date TEXT NOT NULL DEFAULT '',last_redeem_times INTEGER NOT NULL DEFAULT 0,last_points_spent INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS update_history(id INTEGER PRIMARY KEY AUTOINCREMENT,from_version TEXT NOT NULL,to_version TEXT NOT NULL,platform TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL DEFAULT '',started_at TEXT NOT NULL,finished_at TEXT);
+CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_task_runs_started_at ON task_runs(started_at DESC);`)
 	if err == nil {
+		tx, txErr := s.DB.Begin()
+		if txErr != nil {
+			return txErr
+		}
+		defer tx.Rollback()
 		// Existing databases predate the independent keepalive and login-task
 		// switches. Preserve their previous behaviour while adding the new fields.
 		for _, migration := range []struct{ name, definition string }{
@@ -159,16 +168,22 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_started_at ON task_runs(started_at DESC
 			{"login_cron", "TEXT NOT NULL DEFAULT '0 3 * * *'"},
 		} {
 			var count int
-			if e := s.DB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name=?", migration.name).Scan(&count); e != nil {
+			if e := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name=?", migration.name).Scan(&count); e != nil {
 				return e
 			}
 			if count == 0 {
-				if _, e := s.DB.Exec("ALTER TABLE accounts ADD COLUMN " + migration.name + " " + migration.definition); e != nil {
+				if _, e := tx.Exec("ALTER TABLE accounts ADD COLUMN " + migration.name + " " + migration.definition); e != nil {
 					return e
 				}
 			}
 		}
-		_, err = s.DB.Exec("UPDATE task_runs SET status='interrupted',finished_at=?,message='服务重启，任务状态已重置' WHERE status IN ('queued','running')", Now())
+		if _, err = tx.Exec("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,?)", Now()); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("UPDATE task_runs SET status='interrupted',finished_at=?,message='服务重启，任务状态已重置' WHERE status IN ('queued','running')", Now()); err != nil {
+			return err
+		}
+		err = tx.Commit()
 	}
 	return err
 }
@@ -183,6 +198,24 @@ func (s *Store) Setting(k string) (string, error) {
 func (s *Store) SetSetting(k, v string) error {
 	_, e := s.DB.Exec("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", k, v, Now())
 	return e
+}
+
+func (s *Store) HasSetting(key string) bool {
+	var found int
+	return s.DB.QueryRow("SELECT 1 FROM settings WHERE key=?", key).Scan(&found) == nil
+}
+
+// RecordUpdateResult recreates history removed by restoring an older database.
+func (s *Store) RecordUpdateResult(id int64, from, to, platform, status, message, started string) error {
+	_, err := s.DB.Exec(`INSERT INTO update_history(id,from_version,to_version,platform,status,message,started_at,finished_at)
+	VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,message=excluded.message,finished_at=excluded.finished_at`,
+		id, from, to, platform, status, message, started, Now())
+	return err
+}
+
+func (s *Store) InterruptUnfinishedUpdates() error {
+	_, err := s.DB.Exec("UPDATE update_history SET status='failed',message='更新过程被中断，未确认安装成功，请重新检测更新',finished_at=? WHERE finished_at IS NULL", Now())
+	return err
 }
 func scanAccount(r interface{ Scan(...any) error }) (Account, error) {
 	var a Account
@@ -446,6 +479,10 @@ func (s *Store) Claim(id int64, typ, minute string) bool {
 	n, _ := r.RowsAffected()
 	return n == 1
 }
+func (s *Store) ReleaseClaim(id int64, typ, minute string) error {
+	_, err := s.DB.Exec("DELETE FROM scheduler_claims WHERE account_id=? AND task_type=? AND minute_key=?", id, typ, minute)
+	return err
+}
 func (s *Store) Redeem(id int64) (RedeemConfig, error) {
 	var v RedeemConfig
 	var en int
@@ -471,3 +508,69 @@ func (s *Store) SaveRedeem(v RedeemConfig) error {
 	return e
 }
 func (s *Store) Debug() string { return fmt.Sprintf("%p", s.DB) }
+
+type UpdateHistory struct {
+	ID                                       int64
+	FromVersion, ToVersion, Platform, Status string
+	Message, StartedAt, FinishedAt           string
+}
+
+func (s *Store) AddUpdateHistory(from, to, platform, status string) (int64, error) {
+	r, e := s.DB.Exec("INSERT INTO update_history(from_version,to_version,platform,status,started_at) VALUES(?,?,?,?,?)", from, to, platform, status, Now())
+	if e != nil {
+		return 0, e
+	}
+	return r.LastInsertId()
+}
+
+func (s *Store) UpdateUpdateHistory(id int64, status, message string) error {
+	finish := any(nil)
+	switch status {
+	case "success", "failed", "rolled_back":
+		finish = Now()
+	}
+	_, e := s.DB.Exec("UPDATE update_history SET status=?,message=?,finished_at=COALESCE(?,finished_at) WHERE id=?", status, message, finish, id)
+	return e
+}
+
+func (s *Store) RecentUpdateHistory(limit int) ([]UpdateHistory, error) {
+	rows, e := s.DB.Query("SELECT id,from_version,to_version,platform,status,message,started_at,COALESCE(finished_at,'') FROM update_history ORDER BY id DESC LIMIT ?", limit)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []UpdateHistory
+	for rows.Next() {
+		var v UpdateHistory
+		if e = rows.Scan(&v.ID, &v.FromVersion, &v.ToVersion, &v.Platform, &v.Status, &v.Message, &v.StartedAt, &v.FinishedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) HasPendingRedeem() (bool, error) {
+	var count int
+	e := s.DB.QueryRow("SELECT COUNT(*) FROM redeem_states WHERE last_attempt_status='pending'").Scan(&count)
+	return count > 0, e
+}
+
+func (s *Store) Checkpoint() error {
+	_, e := s.DB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return e
+}
+
+func (s *Store) BackupDatabase(destPath string) error {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
+		return err
+	}
+	if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, e := s.DB.Exec("VACUUM INTO ?", destPath)
+	if e == nil {
+		e = os.Chmod(destPath, 0600)
+	}
+	return e
+}

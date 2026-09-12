@@ -164,3 +164,19 @@ document.addEventListener("DOMContentLoaded", () => {
     },
   });
 })();
+
+// HTMX continues polling while the process restarts. Reload the deployment facts
+// once the executor reports a terminal result, including after automatic rollback.
+(() => {
+  let restarting = false;
+  document.addEventListener('htmx:afterSwap', (event) => {
+    if (event.detail.target?.id !== 'update-progress') return;
+    const node = event.detail.target.querySelector('.update-progress-state');
+    if (!node) return;
+    if (node.matches('.stopping, .rolling_back, .restarting')) restarting = true;
+    if ((restarting || node.dataset.version !== document.body.dataset.appVersion) && node.matches('.success, .failed, .rolled_back')) {
+      restarting = false;
+      window.location.reload();
+    }
+  });
+})();

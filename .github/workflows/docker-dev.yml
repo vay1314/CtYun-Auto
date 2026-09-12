@@ -25,6 +25,7 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
         run: |
           if [[ -z "$DOCKERHUB_USERNAME" ]]; then
             echo "Repository variable DOCKERHUB_USERNAME is not configured" >&2
@@ -32,6 +33,10 @@ jobs:
           fi
           if [[ -z "$DOCKERHUB_TOKEN" ]]; then
             echo "Repository secret DOCKERHUB_TOKEN is not configured" >&2
+            exit 1
+          fi
+          if [[ -z "$UPDATE_SIGNING_PRIVATE_KEY" ]]; then
+            echo "Repository secret UPDATE_SIGNING_PRIVATE_KEY is not configured" >&2
             exit 1
           fi
           echo "image=${DOCKERHUB_USERNAME,,}/ctyun-keeper" >> "$GITHUB_OUTPUT"
@@ -44,6 +49,17 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Read launcher version
+        id: versions
+        shell: bash
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+        run: |
+          launcher_version="$(tr -d '[:space:]' < LAUNCHER_VERSION)"
+          [[ "$launcher_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "LAUNCHER_VERSION must use X.Y.Z" >&2; exit 1; }
+          echo "launcher_version=$launcher_version" >> "$GITHUB_OUTPUT"
+          echo "public_key=$(go run ./cmd/ctyun-update-tool public-key)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -78,6 +94,10 @@ jobs:
           push: true
           build-args: |
             APP_VERSION=dev-${{ github.sha }}
+            APP_COMMIT=${{ github.sha }}
+            APP_BUILD_TIME=dev-build-${{ github.run_id }}
+            LAUNCHER_VERSION=${{ steps.versions.outputs.launcher_version }}
+            UPDATE_PUBLIC_KEY=${{ steps.versions.outputs.public_key }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=docker-dev

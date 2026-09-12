@@ -1,6 +1,9 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -11,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -18,6 +22,7 @@ import (
 	"github.com/vay1314/CtYun-Keeper/internal/security"
 	"github.com/vay1314/CtYun-Keeper/internal/service"
 	"github.com/vay1314/CtYun-Keeper/internal/storage"
+	"github.com/vay1314/CtYun-Keeper/internal/update"
 )
 
 type Server struct {
@@ -26,13 +31,56 @@ type Server struct {
 	sessionKey, credentialKey []byte
 	version, dataDir          string
 	secure                    bool
+	updater                   *update.Checker
+	updateManager             *update.Manager
+	updateInitError           error
+	requestShutdown           func(int)
+	ctx                       context.Context
+	cancel                    context.CancelFunc
+	updateWG                  sync.WaitGroup
 	mux                       *http.ServeMux
 }
 
-func New(store *storage.Store, m *service.Manager, sessionKey, credentialKey []byte, version, dataDir, staticDir string, secure bool) *Server {
-	s := &Server{store: store, manager: m, sessionKey: sessionKey, credentialKey: credentialKey, version: version, dataDir: dataDir, secure: secure, mux: http.NewServeMux()}
+func New(store *storage.Store, m *service.Manager, sessionKey, credentialKey []byte, version, dataDir, staticDir, updateRepo, updatePublicKey string, secure bool, requestShutdown func(int)) *Server {
+	proxy := strings.TrimSpace(os.Getenv("GITHUB_PROXY"))
+	if saved, err := store.Setting("github_proxy"); err == nil && store.HasSetting("github_proxy") {
+		proxy = strings.TrimSpace(saved)
+	}
+	updater := update.NewChecker(updateRepo, version, proxy, update.CurrentPlatform())
+	publicKey, keyErr := update.ParsePublicKey(updatePublicKey)
+	if keyErr == nil && len(publicKey) > 0 {
+		updater.SetPublicKey(publicKey)
+	}
+	if keyErr == nil && len(publicKey) == 0 {
+		keyErr = errors.New("当前程序未内置更新签名公钥，请使用正式发布包或镜像")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{
+		store:           store,
+		manager:         m,
+		sessionKey:      sessionKey,
+		credentialKey:   credentialKey,
+		version:         version,
+		dataDir:         dataDir,
+		secure:          secure,
+		updater:         updater,
+		updateManager:   update.NewManager(dataDir),
+		updateInitError: keyErr,
+		requestShutdown: requestShutdown,
+		ctx:             ctx,
+		cancel:          cancel,
+		mux:             http.NewServeMux(),
+	}
 	s.routes(staticDir)
+	s.startAutomaticUpdateChecks()
 	return s
+}
+
+func (s *Server) Close() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.updateWG.Wait()
 }
 func (s *Server) Handler() http.Handler { return s.securityHeaders(s.mux) }
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -68,14 +116,30 @@ func (s *Server) routes(staticDir string) {
 	s.mux.HandleFunc("/settings/password", s.password)
 	s.mux.HandleFunc("/settings/logs/clear", s.clearAllLogs)
 	s.mux.HandleFunc("/settings/logs", s.logSettings)
+	s.mux.HandleFunc("/settings/update/check", s.checkUpdate)
+	s.mux.HandleFunc("/settings/update/install", s.installUpdate)
+	s.mux.HandleFunc("/settings/update/proxy", s.saveUpdateProxy)
+	s.mux.HandleFunc("/partials/update-status", s.updateStatusPartial)
+	s.mux.HandleFunc("/partials/update-badge", s.updateBadgePartial)
 	s.mux.HandleFunc("/settings", s.settings)
 	s.mux.HandleFunc("/api/status", s.apiStatus)
+	s.mux.HandleFunc("/api/update/status", s.apiUpdateStatus)
 	s.mux.HandleFunc("/api/accounts/", s.apiAccountRoute)
 	s.mux.HandleFunc("/", s.dashboard)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"ok","version":%q}`, s.version)
+	database, scheduler, status := "ok", "ok", "ok"
+	if err := s.store.DB.PingContext(r.Context()); err != nil {
+		database, status = "error", "error"
+	}
+	if !s.manager.SchedulerHealthy() {
+		scheduler, status = "error", "error"
+	}
+	if status != "ok" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	fmt.Fprintf(w, `{"status":%q,"version":%q,"database":%q,"scheduler":%q}`, status, s.version, database, scheduler)
 }
 func (s *Server) cookie(w http.ResponseWriter, name, value string, httpOnly bool) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", MaxAge: 12 * 3600, HttpOnly: httpOnly, Secure: s.secure, SameSite: http.SameSiteStrictMode})
@@ -263,9 +327,9 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, title, content str
 		if s.passwordAuthEnabled() {
 			logoutAction = `<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button danger-icon" aria-label="退出"><span class="material-symbols-rounded">power_settings_new</span></button></form>`
 		}
-		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>CtYunKeeper</strong><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="切换网页主题"><span class="local-icon theme-icon-moon" aria-hidden="true"></span><span class="local-icon theme-icon-sun" aria-hidden="true"></span></button><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form>` + logoutAction + `</div></header><button class="sidebar-backdrop" type="button"></button>`
+		nav = `<aside class="sidebar" id="sidebar"><a class="brand" href="/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a><nav><span class="nav-section">管理</span><a class="` + navActive(r.URL.Path, "/") + `" href="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a><a class="` + navActive(r.URL.Path, "/accounts") + `" href="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a><a class="` + navActive(r.URL.Path, "/tasks") + `" href="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a><span class="nav-section">系统</span><a class="` + navActive(r.URL.Path, "/logs") + `" href="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a><a class="` + navActive(r.URL.Path, "/settings") + `" href="/settings"><span class="material-symbols-rounded">settings</span><span>系统设置</span></a></nav><div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><span class="sidebar-product-title"><strong>CtYunKeeper</strong>` + s.updateAvailableBadgeSlot("sidebar") + `</span><small>版本 v` + esc(s.version) + `</small></span></div></aside><header class="topbar"><button class="icon-button sidebar-toggle" type="button"><span class="material-symbols-rounded">menu</span></button><strong>天翼云电脑自动化管理</strong><div class="topbar-actions"><button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="切换网页主题"><span class="local-icon theme-icon-moon" aria-hidden="true"></span><span class="local-icon theme-icon-sun" aria-hidden="true"></span></button><a class="icon-button" href="/logs" aria-label="查看日志"><span class="material-symbols-rounded">notifications</span></a><form method="post" action="/ctyun/restart"><input type="hidden" name="csrf_token" value="` + esc(token) + `"><button class="icon-button" aria-label="重新加载保活"><span class="material-symbols-rounded">refresh</span></button></form>` + logoutAction + `</div></header><button class="sidebar-backdrop" type="button"></button>`
 	}
-	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=color-scheme content='light dark'><meta name=csrf-token content='%s'><title>%s · CtYunKeeper</title><script>(function(){try{var t=localStorage.getItem('ctyun-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.theme=t}catch(e){}})()</script><link rel=stylesheet href='/static/app.css?v=%s-ui10'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s-ui10' defer></script></head><body data-authenticated='%t'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, nav, mainClass, flash, content)
+	fmt.Fprintf(w, "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=color-scheme content='light dark'><meta name=csrf-token content='%s'><title>%s · CtYunKeeper</title><script>(function(){try{var t=localStorage.getItem('ctyun-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.theme=t}catch(e){}})()</script><link rel=stylesheet href='/static/app.css?v=%s-ui15'><script src='/static/htmx.min.js' defer></script><script src='/static/app.js?v=%s-ui15' defer></script></head><body data-authenticated='%t' data-app-version='%s'>%s<main class='%s'>%s%s</main></body></html>", esc(token), esc(title), esc(s.version), esc(s.version), auth, esc(s.version), nav, mainClass, flash, content)
 }
 func redirect(w http.ResponseWriter, r *http.Request, path, msg string, isErr bool) {
 	key := "notice"
@@ -346,7 +410,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r) {
 		return
 	}
-	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p class=page-subtitle>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'>%s</section><article class="panel info-panel"><div class="panel-head dashboard-info-head"><div class=panel-title><span class="panel-icon dashboard-panel-icon">%s</span><div><p class=eyebrow>运行信息</p><h2>服务状态</h2></div></div><span class=service-health><i></i>服务在线</span></div><dl class=service-facts><div><dt><span class=fact-icon>%s</span><span>程序运行时长</span></dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt><span class=fact-icon>%s</span><span>运行架构</span></dt><dd>%s</dd></div><div><dt><span class=fact-icon>%s</span><span>当前版本</span></dt><dd>v%s</dd></div></dl></article>`, s.dashboardMetrics(), dashboardIcon("server"), dashboardIcon("uptime"), int(time.Since(s.manager.Started()).Seconds()), dashboardIcon("cpu"), esc(runtime.GOARCH), dashboardIcon("version"), esc(s.version))
+	content := fmt.Sprintf(`<header class="page-head"><div><p class=eyebrow>运行状态</p><h1>仪表盘</h1><p class=page-subtitle>查看保活服务、账号与自动任务的实时状态</p></div></header><section class=metric-grid id=status-cards hx-get=/partials/status hx-trigger='every 10s'>%s</section><article class="panel info-panel"><div class="panel-head dashboard-info-head"><div class=panel-title><span class="panel-icon dashboard-panel-icon">%s</span><div><p class=eyebrow>运行信息</p><h2>服务状态</h2></div></div><span class=service-health><i></i>服务在线</span></div><dl class=service-facts><div><dt><span class=fact-icon>%s</span><span>程序运行时长</span></dt><dd id=program-uptime data-uptime-seconds="%d">计算中</dd></div><div><dt><span class=fact-icon>%s</span><span>运行架构</span></dt><dd>%s</dd></div><div><dt><span class=fact-icon>%s</span><span>当前版本</span>%s</dt><dd>v%s</dd></div></dl></article>`, s.dashboardMetrics(), dashboardIcon("server"), dashboardIcon("uptime"), int(time.Since(s.manager.Started()).Seconds()), dashboardIcon("cpu"), esc(runtime.GOARCH), dashboardIcon("version"), s.updateAvailableBadgeSlot("dashboard"), esc(s.version))
 	s.page(w, r, "仪表盘", content, true)
 }
 func (s *Server) statusPartial(w http.ResponseWriter, r *http.Request) {
@@ -1104,18 +1168,575 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	authSwitchChecked := "true"
 	authTarget := "false"
 	authLabel := "密码登录已开启"
-	authHint := "访问管理面板时需要验证管理密码"
 	if !authEnabled {
 		authIcon = "icon-lock-open"
 		authSwitchClass = ""
 		authSwitchChecked = "false"
 		authTarget = "true"
 		authLabel = "密码登录已关闭"
-		authHint = "当前为局域网免登录模式"
 	}
-	securityCard := fmt.Sprintf(`<article class="panel form-panel settings-card password-settings-card"><div class=settings-card-head><span class="panel-icon"><span class="local-icon %s" aria-hidden="true"></span></span><div><h2>访问安全</h2><small>管理面板登录方式与访问密码</small></div></div><form method=post action=/settings/password class=password-change-form><input type=hidden name=csrf_token value="{{CSRF}}"><div class=settings-fields><label>当前密码<div class=password-field><input name=current_password type=password required autocomplete=current-password>%s</div></label><label>新密码<div class=password-field><input name=password type=password minlength=8 required autocomplete=new-password>%s</div></label><label>确认新密码<div class=password-field><input name=confirmation type=password minlength=8 required autocomplete=new-password>%s</div></label></div><p class=settings-hint>新密码至少需要 8 位字符</p><button class="primary settings-primary-action">更新密码</button></form><form method=post action=/settings/auth class=settings-auth-toggle-form><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=auth_enabled value="%s"><button class=auth-toggle-button type=submit role=switch aria-checked="%s" aria-label="切换管理面板密码登录"><span class=auth-toggle-copy><strong>%s</strong><small>%s</small></span><span class="auth-switch-control%s" aria-hidden=true><i></i></span></button></form></article>`, authIcon, passwordToggle(), passwordToggle(), passwordToggle(), authTarget, authSwitchChecked, authLabel, authHint, authSwitchClass)
-	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>系统设置</h1><p class=page-subtitle>管理访问安全、运行环境与日志存储策略。</p></div></header><section class=settings-grid>%s<article class="panel info-panel settings-card deployment-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">deployed_code</span><div><h2>部署信息</h2><small>CtYunKeeper 当前运行环境</small></div></div><dl class=deployment-facts><div><dt>服务端口</dt><dd>9845</dd></div><div><dt>当前版本</dt><dd>v%s</dd></div><div><dt>运行方式</dt><dd>Go · Alpine · 单进程</dd></div></dl></article><article class="panel form-panel settings-card log-settings-panel"><div class="settings-card-head log-settings-head"><span class="panel-icon neutral material-symbols-rounded">history</span><div><h2>日志管理</h2><small>设置应用日志的保留与清理方式</small></div><form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><img src=/static/delete-forever.svg alt=""><span>清空全部日志</span></button></form></div><form class=retention-form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<div class=number-field><input name=retention_days type=number min=1 max=3650 value="%d" required><span>天</span></div></label><button class=primary>保存日志设置</button><p class=retention-note>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p></form></article></section>`, securityCard, esc(s.version), s.manager.LogRetentionDays())
+	authToggle := fmt.Sprintf(`<form method=post action=/settings/auth class=settings-auth-toggle-form><input type=hidden name=csrf_token value="{{CSRF}}"><input type=hidden name=auth_enabled value="%s"><button class=auth-toggle-button type=submit role=switch aria-checked="%s" aria-label="切换管理面板密码登录"><strong>%s</strong><span class="auth-switch-control%s" aria-hidden=true><i></i></span></button></form>`, authTarget, authSwitchChecked, authLabel, authSwitchClass)
+	securityCard := fmt.Sprintf(`<article class="panel form-panel settings-card password-settings-card"><div class="settings-card-head password-settings-head"><span class="panel-icon"><span class="local-icon %s" aria-hidden="true"></span></span><div><h2>访问安全</h2><small>管理面板登录方式与访问密码</small></div>%s</div><form method=post action=/settings/password class=password-change-form><input type=hidden name=csrf_token value="{{CSRF}}"><div class=settings-fields><label>当前密码<div class=password-field><input name=current_password type=password required autocomplete=current-password>%s</div></label><label>新密码<div class=password-field><input name=password type=password minlength=8 required autocomplete=new-password>%s</div></label><label>确认新密码<div class=password-field><input name=confirmation type=password minlength=8 required autocomplete=new-password>%s</div></label></div><p class=settings-hint>新密码至少需要 8 位字符</p><button class="primary settings-primary-action">更新密码</button></form></article>`, authIcon, authToggle, passwordToggle(), passwordToggle(), passwordToggle())
+	logCard := fmt.Sprintf(`<article class="panel form-panel settings-card log-settings-panel"><div class="settings-card-head log-settings-head"><span class="panel-icon neutral material-symbols-rounded">history</span><div><h2>日志管理</h2><small>设置应用日志的保留与清理方式</small></div></div><div class=retention-form><div class=retention-controls><form class=retention-save-form method=post action=/settings/logs><input type=hidden name=csrf_token value="{{CSRF}}"><label>日志保留天数<div class=number-field><input name=retention_days type=number min=1 max=3650 value="%d" required><span>天</span></div></label><button class=primary>保存日志设置</button></form><form class=retention-clear-form method=post action=/settings/logs/clear data-confirm="确认清空全部日志？该操作无法恢复。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=danger-button type=submit><img src=/static/delete-forever.svg alt=""><span>清空全部日志</span></button></form></div><p class=retention-note>每天自动清理超过保留期限的系统日志和已结束任务日志，正在执行的任务不会被删除。</p></div></article>`, s.manager.LogRetentionDays())
+	content := fmt.Sprintf(`<header class=page-head><div><p class=eyebrow>系统</p><h1>系统设置</h1><p class=page-subtitle>管理访问安全、运行环境与日志存储策略。</p></div></header><section class=settings-grid>%s%s%s</section>`, securityCard, s.deploymentCard(), logCard)
 	s.page(w, r, "设置", content, true)
+}
+
+type updateState struct {
+	LatestVersion       string `json:"latestVersion"`
+	LatestTag           string `json:"latestTag"`
+	HasUpdate           bool   `json:"hasUpdate"`
+	Supported           bool   `json:"supported"`
+	CurrentIsDev        bool   `json:"currentIsDev"`
+	NewerThanLatest     bool   `json:"newerThanLatest"`
+	Message             string `json:"message"`
+	CheckedAt           string `json:"checkedAt"`
+	PublishedAt         string `json:"publishedAt"`
+	ReleaseURL          string `json:"releaseUrl"`
+	Notes               string `json:"notes"`
+	RequiresImageUpdate bool   `json:"requiresImageUpdate"`
+}
+
+func updateStateFromResult(r *update.CheckResult) updateState {
+	return updateState{
+		LatestVersion:       r.LatestVersion,
+		LatestTag:           r.LatestTag,
+		HasUpdate:           r.HasUpdate,
+		Supported:           r.Supported,
+		CurrentIsDev:        r.CurrentIsDev,
+		NewerThanLatest:     r.NewerThanLatest,
+		Message:             r.Message,
+		CheckedAt:           time.Now().Format("2006-01-02 15:04:05"),
+		PublishedAt:         r.PublishedAt,
+		ReleaseURL:          r.ReleaseURL,
+		Notes:               r.Notes,
+		RequiresImageUpdate: r.RequiresImageUpdate,
+	}
+}
+
+func (s *Server) savedUpdateState() *updateState {
+	if _, valid := update.ParseSemVer(s.version); !valid && !update.IsDevVersion(s.version) {
+		return &updateState{Supported: false, Message: "当前版本格式无效，无法检测更新"}
+	}
+	raw, _ := s.store.Setting("update_state")
+	if raw == "" {
+		return nil
+	}
+	var state updateState
+	if json.Unmarshal([]byte(raw), &state) != nil {
+		return nil
+	}
+	state.CurrentIsDev = update.IsDevVersion(s.version)
+	if latest, ok := update.ParseSemVer(state.LatestVersion); ok {
+		if current, valid := update.ParseSemVer(s.version); valid && current.Compare(latest) >= 0 {
+			state.HasUpdate = false
+			if state.Supported {
+				state.Message = "已是最新版本"
+				if current.Compare(latest) > 0 {
+					state.Message = "正在运行预发布或自定义版本"
+				}
+			}
+		}
+	}
+	return &state
+}
+
+func (s *Server) updateAvailableBadge(location string) string {
+	state := s.savedUpdateState()
+	if state == nil || !state.HasUpdate || !state.Supported || (update.CurrentPlatform().InDocker && state.RequiresImageUpdate) {
+		return ""
+	}
+	return `<a class="update-available-link update-available-` + esc(location) + `" href="/settings" title="发现可用更新" aria-label="发现可用更新，前往系统设置"><img class="update-available-icon" src="/static/update-available.svg?v=2" alt="" aria-hidden="true"></a>`
+}
+
+func (s *Server) updateAvailableBadgeSlot(location string) string {
+	return `<span class="update-available-slot" hx-get="/partials/update-badge?location=` + esc(location) + `" hx-trigger="every 1m" hx-swap="innerHTML">` + s.updateAvailableBadge(location) + `</span>`
+}
+
+func (s *Server) updateBadgePartial(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) {
+		return
+	}
+	location := r.URL.Query().Get("location")
+	if location != "dashboard" && location != "sidebar" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	fmt.Fprint(w, s.updateAvailableBadge(location))
+}
+
+func (s *Server) deploymentCard() string {
+	platform := update.CurrentPlatform()
+	runMode := platform.OS
+	if platform.OS == "windows" {
+		runMode = "Windows"
+	}
+	if platform.InDocker {
+		runMode = "Docker · Alpine"
+	}
+	proxyValue := s.updater.Proxy()
+	state := s.savedUpdateState()
+	if state != nil && platform.InDocker && state.RequiresImageUpdate && platform.ImageVersion != state.LatestVersion && s.version == state.LatestVersion {
+		state.Message = "当前程序已是最新版，但容器运行环境需要升级"
+	}
+	latestText := "尚未检测"
+	statusMarkup := ""
+	releaseMarkup := ""
+	installMarkup := ""
+	if state != nil {
+		if state.LatestVersion != "" {
+			latestText = "v" + state.LatestVersion
+		}
+		if state.Message != "" {
+			class := "neutral"
+			switch {
+			case !state.Supported:
+				class = "warning"
+			case state.HasUpdate:
+				class = "success"
+			case state.NewerThanLatest:
+				class = "warning"
+			}
+			statusMarkup = fmt.Sprintf(`<p class="update-status %s">%s</p>`, class, esc(state.Message))
+		}
+		if state.ReleaseURL != "" && update.ValidateReleaseURL(state.ReleaseURL, state.LatestTag) == nil {
+			releaseMarkup = fmt.Sprintf(`<p class=update-release><a href="%s" target=_blank rel="noopener noreferrer">查看更新说明</a>%s</p>`, esc(state.ReleaseURL), func() string {
+				if state.PublishedAt != "" {
+					return ` · 发布于 ` + esc(formatTime(state.PublishedAt))
+				}
+				return ""
+			}())
+		}
+		if state.HasUpdate && state.Supported && !(platform.InDocker && state.RequiresImageUpdate) {
+			installMarkup = `<form method=post action=/settings/update/install class=update-install-form data-confirm="确认安装此更新？程序将自动重启。"><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary>在线更新</button></form>`
+		}
+	}
+	extraFacts := ""
+	if platform.InDocker {
+		if notice := os.Getenv("CTYUN_IMAGE_UPDATE_REQUIRED"); notice != "" {
+			statusMarkup += `<p class="update-status warning">` + esc(notice) + `</p><pre>docker compose pull` + "\n" + `docker compose up -d</pre>`
+		}
+		if current, ok := update.ParseSemVer(s.version); ok {
+			if builtin, valid := update.ParseSemVer(platform.BuiltinVersion); valid && current.Compare(builtin) > 0 {
+				statusMarkup += `<p class="update-status neutral">程序已通过容器内更新升级</p>`
+			}
+		}
+		if state != nil && (state.RequiresImageUpdate || strings.Contains(state.Message, "Launcher")) {
+			statusMarkup += `<p>请在部署目录更新镜像：</p><pre>docker compose pull` + "\n" + `docker compose up -d</pre>`
+		}
+	}
+	if platform.InDocker {
+		extraFacts = fmt.Sprintf(`<div><dt>镜像内置版本</dt><dd>v%s</dd></div><div><dt>Launcher 版本</dt><dd>v%s</dd></div><div><dt>Docker 镜像版本</dt><dd>v%s</dd></div>`, esc(orDash(platform.BuiltinVersion)), esc(orDash(platform.LauncherVersion)), esc(orDash(platform.ImageVersion)))
+	}
+	return fmt.Sprintf(`<article class="panel info-panel settings-card deployment-settings-card"><div class=settings-card-head><span class="panel-icon material-symbols-rounded">deployed_code</span><div><h2>部署信息</h2><small>CtYunKeeper 当前运行环境</small></div></div><dl class=deployment-facts><div><dt>当前版本</dt><dd>v%s</dd></div><div><dt>运行平台</dt><dd>%s</dd></div><div><dt>系统架构</dt><dd>%s</dd></div>%s<div><dt>最新版本</dt><dd>%s</dd></div></dl>%s%s<div id=update-progress hx-get=/partials/update-status hx-trigger="load, every 2s" hx-swap=innerHTML></div><form id=update-proxy-form class=update-proxy-form method=post action=/settings/update/proxy><input type=hidden name=csrf_token value="{{CSRF}}"><label>GitHub 代理<input name=github_proxy value="%s" placeholder="留空使用 GitHub 直连"></label><button class=secondary type=submit>保存代理</button></form><div class=deployment-actions><form method=post action=/settings/update/check><input type=hidden name=csrf_token value="{{CSRF}}"><button class=primary>检测更新</button></form>%s</div></article>`, esc(s.version), runMode, platform.OS+"/"+platform.Arch, extraFacts, latestText, statusMarkup, releaseMarkup, esc(proxyValue), installMarkup)
+}
+
+func orDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "--"
+	}
+	return strings.TrimPrefix(value, "v")
+}
+
+func (s *Server) checkUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.updater == nil {
+		redirect(w, r, "/settings", "更新服务未初始化", true)
+		return
+	}
+	if s.updateInitError != nil {
+		redirect(w, r, "/settings", "更新签名公钥无效："+s.updateInitError.Error(), true)
+		return
+	}
+	if err := s.updateManager.Begin(); err != nil {
+		redirect(w, r, "/settings", err.Error(), true)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	result, err := s.performUpdateCheck(ctx)
+	if err != nil {
+		redirect(w, r, "/settings", "检测更新失败："+err.Error(), true)
+		return
+	}
+	redirect(w, r, "/settings", result.Message, false)
+}
+
+func (s *Server) performUpdateCheck(ctx context.Context) (*update.CheckResult, error) {
+	s.updateManager.SetProgress(update.Progress{Status: update.StatusChecking, Message: "正在获取更新清单", FromVersion: s.version})
+	result, err := s.updater.Check(ctx)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			err = errors.New("检测更新超时，请检查网络或代理设置")
+		}
+		s.updateManager.Fail(err)
+		return nil, err
+	}
+	status := update.StatusIdle
+	if result.HasUpdate {
+		status = update.StatusAvailable
+	}
+	raw, _ := json.Marshal(updateStateFromResult(result))
+	if err := s.store.SetSetting("update_state", string(raw)); err != nil {
+		err = fmt.Errorf("保存检测结果失败: %w", err)
+		s.updateManager.Fail(err)
+		return nil, err
+	}
+	s.updateManager.SetProgress(update.Progress{Status: status, Message: result.Message, FromVersion: s.version, TargetVersion: result.LatestVersion})
+	s.updateManager.Finish()
+	return result, nil
+}
+
+const automaticUpdateCheckHour = 4
+
+func nextAutomaticUpdateCheck(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), automaticUpdateCheckHour, 0, 0, 0, now.Location())
+	if !next.After(now) {
+		tomorrow := now.AddDate(0, 0, 1)
+		next = time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), automaticUpdateCheckHour, 0, 0, 0, now.Location())
+	}
+	return next
+}
+
+func (s *Server) startAutomaticUpdateChecks() {
+	_, validVersion := update.ParseSemVer(s.version)
+	if s.ctx == nil || s.updater == nil || s.updateManager == nil || (!validVersion && !update.IsDevVersion(s.version)) {
+		return
+	}
+	s.updateWG.Add(1)
+	go func() {
+		defer s.updateWG.Done()
+		for {
+			delay := time.Until(nextAutomaticUpdateCheck(time.Now()))
+			timer := time.NewTimer(delay)
+			select {
+			case <-s.ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+				s.runAutomaticUpdateCheck()
+			}
+		}
+	}()
+}
+
+func (s *Server) runAutomaticUpdateCheck() {
+	if s.ctx.Err() != nil || s.updateInitError != nil {
+		return
+	}
+	if err := s.updateManager.Begin(); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
+	defer cancel()
+	_, _ = s.performUpdateCheck(ctx)
+}
+
+func (s *Server) saveUpdateProxy(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	proxy := strings.TrimSpace(r.FormValue("github_proxy"))
+	if err := update.ValidateProxy(proxy); err != nil {
+		redirect(w, r, "/settings", "代理设置无效："+err.Error(), true)
+		return
+	}
+	if err := s.store.SetSetting("github_proxy", proxy); err != nil {
+		redirect(w, r, "/settings", "保存代理设置失败："+err.Error(), true)
+		return
+	}
+	if s.updater != nil {
+		s.updater.SetProxy(proxy)
+	}
+	redirect(w, r, "/settings", "代理设置已保存", false)
+}
+
+func (s *Server) installUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) || r.Method != http.MethodPost {
+		return
+	}
+	if !s.checkCSRF(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.requestShutdown == nil || s.updater == nil || s.updateManager == nil {
+		redirect(w, r, "/settings", "当前程序未启用在线更新执行器", true)
+		return
+	}
+	if s.updateInitError != nil {
+		redirect(w, r, "/settings", "更新签名公钥无效："+s.updateInitError.Error(), true)
+		return
+	}
+	if err := s.updateManager.Begin(); err != nil {
+		redirect(w, r, "/settings", err.Error(), true)
+		return
+	}
+	s.updateWG.Add(1)
+	go func() {
+		defer s.updateWG.Done()
+		s.runUpdateInstall()
+	}()
+	redirect(w, r, "/settings", "更新任务已启动", false)
+}
+
+func (s *Server) runUpdateInstall() {
+	var historyID int64
+	fail := func(err error) {
+		s.manager.CancelUpdateMaintenance()
+		if historyID > 0 {
+			_ = s.store.UpdateUpdateHistory(historyID, "failed", err.Error())
+		}
+		s.updateManager.Fail(err)
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Minute)
+	defer cancel()
+	if err := s.manager.CheckUpdateBlockers(); err != nil {
+		fail(err)
+		return
+	}
+	if err := ensureWritable(s.dataDir); err != nil {
+		fail(err)
+		return
+	}
+	s.updateManager.SetProgress(update.Progress{Status: update.StatusChecking, Message: "正在获取更新清单", FromVersion: s.version})
+	result, err := s.updater.Check(ctx)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if !result.HasUpdate || !result.Supported || result.Manifest == nil {
+		fail(fmt.Errorf("%s", result.Message))
+		return
+	}
+	platform := update.CurrentPlatform()
+	asset, _ := result.Manifest.AssetFor(platform.OS, platform.Arch)
+	restart, serviceName, err := update.ResolveRestart(os.Getenv("UPDATE_RESTART_MODE"))
+	if err != nil {
+		fail(err)
+		return
+	}
+	if asset.Size <= 0 {
+		fail(errors.New("更新包大小无效"))
+		return
+	}
+	if free, diskErr := update.AvailableDiskSpace(s.dataDir); diskErr != nil {
+		fail(fmt.Errorf("读取磁盘空间失败: %w", diskErr))
+		return
+	} else if uint64(asset.Size) > free/3 {
+		fail(fmt.Errorf("磁盘空间不足：至少需要 %.1f MB", float64(asset.Size*3)/(1<<20)))
+		return
+	}
+	historyID, err = s.store.AddUpdateHistory(s.version, result.LatestVersion, platform.AssetKey(), "downloading")
+	if err != nil {
+		fail(err)
+		return
+	}
+	installer := update.NewInstaller(s.updater, s.dataDir, s.version, platform)
+	s.updateManager.SetProgress(update.Progress{Status: update.StatusDownloading, Message: "正在下载更新包", FromVersion: s.version, TargetVersion: result.LatestVersion})
+	req, err := installer.Prepare(ctx, result.Manifest, func(received, total int64) {
+		percent := 0
+		if total > 0 {
+			percent = int(received * 100 / total)
+		}
+		s.updateManager.SetProgress(update.Progress{Status: update.StatusDownloading, Percent: percent, Received: received, Total: total, Message: "正在下载更新包", FromVersion: s.version, TargetVersion: result.LatestVersion})
+	})
+	if err != nil {
+		fail(err)
+		return
+	}
+	s.updateManager.SetProgress(update.Progress{Status: update.StatusVerifying, Percent: 100, Message: "更新包校验完成，正在检查运行状态", FromVersion: s.version, TargetVersion: result.LatestVersion})
+	waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = s.manager.PrepareForUpdate(waitCtx)
+	waitCancel()
+	if err != nil {
+		fail(err)
+		return
+	}
+	if err = ensureWritable(s.dataDir); err != nil {
+		fail(err)
+		return
+	}
+	if err = s.store.Checkpoint(); err != nil {
+		fail(fmt.Errorf("数据库 checkpoint 失败: %w", err))
+		return
+	}
+	databasePath := filepath.Join(s.dataDir, "ctyun-keeper.db")
+	databaseBackup := filepath.Join(req.BackupDir, "database", "ctyun-keeper.db")
+	_ = os.Remove(databaseBackup)
+	if err = s.store.BackupDatabase(databaseBackup); err != nil {
+		fail(fmt.Errorf("备份数据库失败: %w", err))
+		return
+	}
+	token, err := update.NewRequestToken()
+	if err != nil {
+		fail(err)
+		return
+	}
+	req.Action = "install"
+	req.ParentPID = os.Getpid()
+	req.DatabasePath = databasePath
+	req.DatabaseBackup = databaseBackup
+	req.HealthURL = "http://127.0.0.1:" + appPort() + "/health"
+	req.RestartMode, req.ServiceName = restart, serviceName
+	req.Token = token
+	req.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	req.HistoryID = historyID
+	req.ResultPath = filepath.Join(s.dataDir, "updates", "results", fmt.Sprintf("%d.json", historyID))
+	if err = s.writeUpdateRequest(req, token, platform.InDocker); err != nil {
+		fail(err)
+		return
+	}
+	_ = s.store.UpdateUpdateHistory(historyID, "staged", "更新包已验证")
+	s.updateManager.SetProgress(update.Progress{Status: update.StatusStopping, Percent: 100, Message: "正在准备重启", FromVersion: s.version, TargetVersion: result.LatestVersion})
+	if platform.InDocker {
+		if err := s.updateManager.HandOff(req.Token); err != nil {
+			fail(err)
+			return
+		}
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			s.requestShutdown(update.ExitUpdateRequested)
+		}()
+		return
+	}
+	updaterSource := filepath.Join(filepath.Dir(req.Executable), "ctyun-keeper-updater.exe")
+	updaterTemp := filepath.Join(s.dataDir, "updates", "helper", token+".exe")
+	if err = update.CopyFile(updaterSource, updaterTemp); err != nil {
+		fail(fmt.Errorf("准备更新助手失败: %w", err))
+		return
+	}
+	if err := s.updateManager.HandOff(req.Token); err != nil {
+		fail(err)
+		return
+	}
+	if err = update.LaunchUpdater(updaterTemp, updateRequestPath(s.dataDir), token, filepath.Dir(req.Executable), s.dataDir); err != nil {
+		update.ReleaseUpdateLock(s.dataDir, req.Token)
+		fail(fmt.Errorf("启动更新助手失败: %w", err))
+		return
+	}
+	if req.RestartMode == "supervisor" {
+		return
+	}
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		s.requestShutdown(0)
+	}()
+}
+
+func ensureWritable(dir string) error {
+	path := filepath.Join(dir, "updates", ".write-test")
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return fmt.Errorf("更新目录不可写: %w", err)
+	}
+	if err := os.WriteFile(path, []byte("ok"), 0600); err != nil {
+		return fmt.Errorf("更新目录不可写: %w", err)
+	}
+	return os.Remove(path)
+}
+
+func appPort() string {
+	if value := strings.TrimSpace(os.Getenv("APP_PORT")); value != "" {
+		return value
+	}
+	return "9845"
+}
+
+func updateRequestPath(dataDir string) string {
+	return filepath.Join(dataDir, "updates", "install-request.json")
+}
+
+func (s *Server) writeUpdateRequest(req update.InstallRequest, token string, inDocker bool) error {
+	if err := req.Validate(s.dataDir, filepath.Dir(req.Executable), token); err != nil {
+		return err
+	}
+	if err := update.WriteInstallRequest(updateRequestPath(s.dataDir), req); err != nil {
+		return err
+	}
+	if inDocker {
+		return update.WriteInstallToken(s.dataDir, token)
+	}
+	return nil
+}
+
+func (s *Server) updateStatusPartial(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) {
+		return
+	}
+	progress := s.currentUpdateProgress()
+	if progress.Status == update.StatusIdle {
+		return
+	}
+	fmt.Fprintf(w, `<div class="update-progress-state %s" data-version="%s"><strong>%s</strong><progress max=100 value="%d"></progress><small>%s</small></div>`, esc(string(progress.Status)), esc(s.version), esc(progress.Message), progress.Percent, esc(formatBytesProgress(progress.Received, progress.Total)))
+}
+
+func formatBytesProgress(received, total int64) string {
+	if received <= 0 {
+		return ""
+	}
+	if total > 0 {
+		return fmt.Sprintf("%.1f MB / %.1f MB", float64(received)/(1<<20), float64(total)/(1<<20))
+	}
+	return fmt.Sprintf("%.1f MB", float64(received)/(1<<20))
+}
+
+func (s *Server) apiUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.currentUpdateProgress())
+}
+
+func (s *Server) currentUpdateProgress() update.Progress {
+	p := s.updateManager.Progress()
+	if raw, err := os.ReadFile(filepath.Join(s.dataDir, "updates", "executor-progress.json")); err == nil {
+		var external update.Progress
+		if json.Unmarshal(raw, &external) == nil {
+			return external
+		}
+	}
+	if p.Status != update.StatusIdle {
+		return p
+	}
+	if p.Message != "" {
+		return p
+	}
+	if history, err := s.store.RecentUpdateHistory(1); err == nil && len(history) > 0 {
+		h := history[0]
+		return update.Progress{Status: update.Status(h.Status), Message: h.Message, FromVersion: h.FromVersion, TargetVersion: h.ToVersion, UpdatedAt: h.FinishedAt}
+	}
+	return p
+}
+
+// Called after consuming executor results, including failures before shutdown.
+func (s *Server) RefreshUpdateResult() {
+	p := s.updateManager.Progress()
+	if p.Status != update.StatusStopping && p.Status != update.StatusRollingBack {
+		return
+	}
+	history, err := s.store.RecentUpdateHistory(1)
+	if err != nil || len(history) == 0 || history[0].FinishedAt == "" {
+		return
+	}
+	h := history[0]
+	s.manager.CancelUpdateMaintenance()
+	s.updateManager.Finish()
+	s.updateManager.SetProgress(update.Progress{Status: update.Status(h.Status), Message: h.Message, TargetVersion: h.ToVersion})
 }
 
 func (s *Server) authSettings(w http.ResponseWriter, r *http.Request) {

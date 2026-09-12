@@ -89,6 +89,89 @@ func TestNativeAuthCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpdateHistoryRoundTrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	id, err := s.AddUpdateHistory("2.0.0", "2.1.0", "linux-amd64", "downloading")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUpdateHistory(id, "success", ""); err != nil {
+		t.Fatal(err)
+	}
+	history, err := s.RecentUpdateHistory(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].Status != "success" || history[0].FinishedAt == "" {
+		t.Fatalf("history = %#v", history)
+	}
+}
+
+func TestHasPendingRedeem(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pending, err := s.HasPendingRedeem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending {
+		t.Fatal("expected no pending redeem in empty database")
+	}
+	_, err = s.DB.Exec("INSERT INTO accounts(name,username,password_encrypted,device_code,created_at,updated_at) VALUES('a','u','p','d','now','now')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.DB.Exec("INSERT INTO redeem_states(account_id,last_attempt_status,updated_at) VALUES(1,'pending',?)", Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.HasPendingRedeem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatal("expected pending redeem to be detected")
+	}
+}
+
+func TestBackupDatabase(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting("test", "value"); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dir, "backups", "ctyun-keeper.db")
+	if err := s.BackupDatabase(backup); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	restored, err := Open(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	value, err := restored.Setting("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "value" {
+		t.Fatalf("restored setting = %q", value)
+	}
+}
+
 func TestAccountAutomationSettingsRoundTrip(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
