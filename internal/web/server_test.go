@@ -27,6 +27,26 @@ func TestFormatTime(t *testing.T) {
 	}
 }
 
+func TestPageLoadsThemeBootstrapUnderContentSecurityPolicy(t *testing.T) {
+	server := &Server{version: "test", sessionKey: []byte("test-session-key")}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder := httptest.NewRecorder()
+
+	server.page(recorder, request, "test", "content", false)
+	body := recorder.Body.String()
+	themeScript := strings.Index(body, "<script src='/static/theme.js?")
+	stylesheet := strings.Index(body, "<link rel=stylesheet")
+	if themeScript < 0 {
+		t.Fatal("page does not load the external theme bootstrap")
+	}
+	if stylesheet < 0 || themeScript > stylesheet {
+		t.Fatal("theme bootstrap must run before the stylesheet is loaded")
+	}
+	if strings.Contains(body, "localStorage.getItem") {
+		t.Fatal("page contains an inline theme script blocked by the content security policy")
+	}
+}
+
 func TestValidateKeepaliveSettings(t *testing.T) {
 	valid := storage.Account{KeepaliveMode: storage.KeepaliveScheduled, KeepaliveStart: "22:00", KeepaliveEnd: "06:00", KeepaliveWeekdays: "1,3,5"}
 	if err := validateKeepaliveSettings(valid); err != nil {

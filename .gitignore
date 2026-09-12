@@ -8,3 +8,4 @@
 /.gopath/
 /.tmp-*
 /.preview-data/
+/UPDATE_SIGNING_PRIVATE_KEY.txt
