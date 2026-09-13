@@ -55,11 +55,12 @@ func TestPreemptionClose(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{&websocket.CloseError{Code: 1000, Text: "normal"}, true},
-		{&websocket.CloseError{Code: 1001, Text: "away"}, true},
+		{&websocket.CloseError{Code: 1000, Text: "normal"}, false},
+		{&websocket.CloseError{Code: 1001, Text: "away"}, false},
 		{&websocket.CloseError{Code: 4001, Text: "login elsewhere"}, true},
 		{&websocket.CloseError{Code: 4010, Text: "session preempted"}, true},
 		{&websocket.CloseError{Code: 4010, Text: "client conflict"}, true},
+		{&websocket.CloseError{Code: 1000, Text: "其他客户端登录，会话被抢占"}, true},
 		{&websocket.CloseError{Code: 1006, Text: "network error"}, false},
 		{errors.New("plain network error"), false},
 	}

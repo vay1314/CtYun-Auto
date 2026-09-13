@@ -148,7 +148,16 @@ func preemptionClose(err error) (string, bool) {
 	}
 	reason := strings.TrimSpace(closeErr.Text)
 	lower := strings.ToLower(reason)
-	if closeErr.Code == 1000 || closeErr.Code == 1001 || closeErr.Code == 4001 || strings.Contains(lower, "preempt") || strings.Contains(lower, "conflict") {
+	preempted := closeErr.Code == 4001 ||
+		strings.Contains(lower, "preempt") ||
+		strings.Contains(lower, "conflict") ||
+		strings.Contains(lower, "elsewhere") ||
+		strings.Contains(reason, "抢占") ||
+		strings.Contains(reason, "冲突") ||
+		strings.Contains(reason, "异地登录") ||
+		strings.Contains(reason, "其他客户端") ||
+		strings.Contains(reason, "顶号")
+	if preempted {
 		if reason == "" {
 			reason = "无附加说明"
 		}

@@ -41,8 +41,13 @@ type Server struct {
 	mux                       *http.ServeMux
 }
 
+const defaultGitHubProxy = "https://gh-proxy.com/"
+
 func New(store *storage.Store, m *service.Manager, sessionKey, credentialKey []byte, version, dataDir, staticDir, updateRepo, updatePublicKey string, secure bool, requestShutdown func(int)) *Server {
 	proxy := strings.TrimSpace(os.Getenv("GITHUB_PROXY"))
+	if proxy == "" {
+		proxy = defaultGitHubProxy
+	}
 	if saved, err := store.Setting("github_proxy"); err == nil && store.HasSetting("github_proxy") {
 		proxy = strings.TrimSpace(saved)
 	}

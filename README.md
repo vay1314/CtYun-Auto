@@ -143,7 +143,7 @@ go build ./cmd/ctyun-keeper
 | `TZ` | `Asia/Shanghai` | 容器时区 |
 | `UPDATE_RESTART_MODE` | `auto` | 自动识别 Windows 服务；`self` 独立重启，`supervisor` 协调服务停止、替换、启动；start.bat 默认 self |
 | `UPDATE_SERVICE_NAME` | 空 | Windows 服务名，自动识别失败时指定 |
-| `GITHUB_PROXY` | 空 | GitHub 下载代理；管理页面保存的值优先 |
+| `GITHUB_PROXY` | `https://gh-proxy.com/` | GitHub 下载代理；管理页面保存的值优先，清空后使用 GitHub 直连 |
 | `CTYUN_UPDATE_REPO` | `vay1314/CtYun-Keeper` | 检测更新使用的 GitHub 仓库 |
 
 ## 致谢

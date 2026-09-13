@@ -166,6 +166,31 @@ func TestSavedEmptyProxyOverridesEnvironment(t *testing.T) {
 	}
 }
 
+func TestDefaultProxyCanBeCleared(t *testing.T) {
+	t.Setenv("GITHUB_PROXY", "")
+	store, err := storage.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	makeServer := func() *Server {
+		return New(store, nil, nil, nil, "2.1.0", t.TempDir(), t.TempDir(), "", "", false, nil)
+	}
+	s := makeServer()
+	if s.updater.Proxy() != defaultGitHubProxy {
+		t.Fatalf("default proxy = %q, want %q", s.updater.Proxy(), defaultGitHubProxy)
+	}
+	s.Close()
+	if err := store.SetSetting("github_proxy", ""); err != nil {
+		t.Fatal(err)
+	}
+	s = makeServer()
+	defer s.Close()
+	if s.updater.Proxy() != "" {
+		t.Fatal("saved empty proxy did not select direct access")
+	}
+}
+
 func TestRestartedServerShowsResultAndCurrentVersion(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "db"))
 	if err != nil {
