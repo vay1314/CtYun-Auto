@@ -5,6 +5,7 @@
 /ctyun-keeper.exe
 /dist/
 /.gocache/
+/.gotmp/
 /.gopath/
 /.tmp-*
 /.preview-data/
